@@ -317,13 +317,13 @@ function paragraphText(element, text) {
 
 function renderParagraphs(force = false) {
   const paragraphs = state.paper?.paragraphs || [];
-  const figureTextIds = new Set((state.paper?.figures || []).flatMap((figure) => Array.isArray(figure.text_paragraph_ids) ? figure.text_paragraph_ids.map(String) : []));
+  const figureTextIds = getFigureTextIds();
   let searchChanged = false;
   for (const paragraph of paragraphs) {
     const id = String(paragraph.id);
     // The figure already contains these labels at their original coordinates.
     // Keep source text and translations in storage; suppress only confirmed duplicates here.
-    if (paragraph.kind !== 'heading' && figureTextIds.has(id)) {
+    if (figureTextIds.has(id)) {
       const duplicate = state.blocks.get(id);
       if (duplicate) { duplicate.remove(); state.blocks.delete(id); searchChanged = true; }
       continue;
@@ -409,22 +409,25 @@ function renderParagraphs(force = false) {
 }
 
 function renderEquationSource(element, paragraph) {
-  const signature = JSON.stringify([state.paper.id, paragraph.id, paragraph.text, paragraph.equation_image]);
+  const signature = JSON.stringify([state.paper.id, state.paper.parse_version, paragraph.id, paragraph.text, paragraph.equation_image, paragraph.equation_source, paragraph.ambiguous_inline_math]);
   if (element.dataset.equationSignature === signature) return;
   element.dataset.equationSignature = signature;
   delete element.dataset.textSignature;
   delete element.dataset.mathSearchHit;
   element.replaceChildren();
-  const url = `/api/papers/${encodeURIComponent(state.paper.id)}/equations/${encodeURIComponent(paragraph.id)}.png`;
+  const regionVersion = [state.paper.parse_version || 1, paragraph.equation_source?.page || paragraph.page, ...(paragraph.equation_source?.bbox || [])].join(',');
+  const url = `/api/papers/${encodeURIComponent(state.paper.id)}/equations/${encodeURIComponent(paragraph.id)}.png?v=${encodeURIComponent(regionVersion)}`;
   const link = node('a', 'equation-source-link');
   link.href = url;
   link.target = '_blank';
   link.rel = 'noopener';
-  link.title = '在新窗口查看原数学公式';
+  const sourceLabel = paragraph.ambiguous_inline_math ? '原文片段' : '原式';
+  const sourceNote = paragraph.ambiguous_inline_math ? '原文片段（含复杂公式，保留原图）' : '原式（复杂公式保留原图）';
+  link.title = `在新窗口查看${sourceLabel}`;
   const image = document.createElement('img');
   image.loading = 'lazy';
   image.decoding = 'async';
-  image.alt = `第 ${paragraph.page || 1} 页的原数学公式`;
+  image.alt = `第 ${paragraph.page || 1} 页的${sourceLabel}`;
   const dimensions = paragraph.equation_image;
   if (Number(dimensions.width) > 0 && Number(dimensions.height) > 0) {
     image.width = Math.min(10000, Number(dimensions.width));
@@ -433,10 +436,10 @@ function renderEquationSource(element, paragraph) {
     image.style.width = `${Math.min(10000, Number(dimensions.width)) / 11}em`;
   }
   const note = node('small', 'equation-source-note');
-  const noteText = node('span', '', '原式（复杂公式保留原图）');
+  const noteText = node('span', '', sourceNote);
   note.append(noteText, imageRetryButton(image, url));
-  image.addEventListener('error', () => { image.hidden = true; noteText.textContent = '原式图片暂未加载，可重试或打开原版 PDF 查看。'; });
-  image.addEventListener('load', () => { image.hidden = false; noteText.textContent = '原式（复杂公式保留原图）'; });
+  image.addEventListener('error', () => { image.hidden = true; noteText.textContent = `${sourceLabel}图片暂未加载，可重试或打开原版 PDF 查看。`; });
+  image.addEventListener('load', () => { image.hidden = false; noteText.textContent = sourceNote; });
   image.src = url;
   link.append(image);
   element.append(link, note);
@@ -551,9 +554,15 @@ function renderFigures() {
   } else notice?.remove();
 }
 
+function getFigureTextIds() {
+  return new Set((state.paper?.figures || []).flatMap((figure) => Array.isArray(figure.text_paragraph_ids) ? figure.text_paragraph_ids.map(String) : []));
+}
+
 function getOutline() {
-  if (state.paper?.outline?.length) return state.paper.outline;
-  return (state.paper?.paragraphs || []).filter((p) => p.kind === 'heading').map((p) => ({ id: p.id, title: p.text, level: p.level || 1, page: p.page, paragraph_id: p.id }));
+  const labels = getFigureTextIds();
+  const outline = state.paper?.outline?.length ? state.paper.outline
+    : (state.paper?.paragraphs || []).filter((p) => p.kind === 'heading').map((p) => ({ id: p.id, title: p.text, level: p.level || 1, page: p.page, paragraph_id: p.id }));
+  return outline.filter((section) => !labels.has(String(section.paragraph_id ?? section.id)));
 }
 
 function renderOutline() {

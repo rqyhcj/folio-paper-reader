@@ -158,6 +158,25 @@ assert.equal(withClass(safe, 'katex').length, 2);
 assert.ok(!walk(safe).some((item) => item.nodeName === 'MARK'));
 assert.equal(safe.dataset.mathSearchHit, undefined);
 
+// Reusing a paragraph ID after reflow must fetch the new source coordinates,
+// even when its crop dimensions and extracted text have not changed.
+const crop = new TestNode('div');
+context.element = crop;
+context.paragraph = { id: 'p-15', page: 6, text: 'complex display',
+  equation_source: { page: 6, bbox: [60, 100, 290, 140] },
+  equation_image: { width: 230, height: 40 }, ambiguous_inline_math: false };
+vm.runInContext("state.paper={id:'local-paper',parse_version:4}; renderEquationSource(element, paragraph);", context);
+const firstCrop = walk(crop).find((item) => item.nodeName === 'IMG');
+const firstCropUrl = firstCrop.src;
+assert.ok(firstCropUrl.includes('.png?v='));
+context.paragraph.equation_source.bbox = [60, 180, 290, 220];
+vm.runInContext('renderEquationSource(element, paragraph);', context);
+const changedCrop = walk(crop).find((item) => item.nodeName === 'IMG');
+assert.notEqual(changedCrop, firstCrop);
+assert.notEqual(changedCrop.src, firstCropUrl);
+vm.runInContext('renderEquationSource(element, paragraph);', context);
+assert.equal(walk(crop).find((item) => item.nodeName === 'IMG'), changedCrop);
+
 // Asset references must remain local, including the stylesheet's font files.
 const index = read('static/index.html');
 assert.ok(index.includes('src="/vendor/katex/katex.min.js"'));

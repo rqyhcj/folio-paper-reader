@@ -20,3 +20,5 @@ jobs:
         run: node tests/test_math.cjs
       - name: Check model picker interactions
         run: node tests/test_model_picker.cjs
+      - name: Check figure labels and outline
+        run: node tests/test_outline_labels.cjs

@@ -238,5 +238,5 @@ assert.match(html, /<input id="api-model"[^>]*role="combobox"[^>]*aria-controls=
 assert.match(html, /<button type="button" id="api-model-toggle"/);
 assert.match(html, /id="api-model-options"[^>]*role="listbox"/);
 assert.ok(html.includes('/providers.css?v=model-picker-2'));
-assert.ok(html.includes('/app.js?v=model-picker-2'));
+assert.match(html, /\/app\.js\?v=[^"\s]+/);
 console.log('PASS: model suggestions support saved/custom IDs, empty providers, one-click full lists, pointer/keyboard selection, IME, focus dismissal, safe text and busy state without model requests or settings writes.');

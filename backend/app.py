@@ -463,7 +463,7 @@ async def export(paper_id: str, format: str = "markdown"):
     equation_paths = {}
     if format in ("pdf", "html"):
         for paragraph in paper["paragraphs"]:
-            if paragraph.get("kind") == "equation" and paragraph.get("math_status") == "source-image":
+            if paragraph.get("math_status") == "source-image":
                 try:
                     equation_paths[paragraph["id"]] = await asyncio.to_thread(equation_png, paper, paragraph["id"])
                 except Exception:
@@ -495,17 +495,19 @@ async def export(paper_id: str, format: str = "markdown"):
                 continue
             tag = "h2" if p["kind"] == "heading" else "p"
             section = "".join(image_html(f) for f in paper.get("figures", []) if f.get("before_paragraph_id") == p["id"])
-            if p.get("kind") == "equation":
+            if p.get("kind") == "equation" or p.get("math_status") == "source-image":
                 if p.get("math_status") == "source-image":
                     path = equation_paths.get(p["id"])
                     if path is not None and path.is_file():
                         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-                        equation = f'<img style="max-width:100%;height:auto" src="data:image/png;base64,{encoded}" alt="原文数学公式">'
+                        equation = f'<img style="max-width:100%;height:auto" src="data:image/png;base64,{encoded}" alt="原文片段与数学公式">'
                     else:
                         equation = "<p>[公式原图未能导出，请查看原始 PDF]</p>"
                 else:
                     equation = f'<p class="en">{html.escape(p["text"])}</p>'
                 section += f'<section class="equation">{equation}</section>'
+                if p.get("kind") != "equation":
+                    section += f'<p class="zh">{html.escape(p.get("translation") or "[尚未翻译]")}</p>'
             else:
                 section += f'<section><{tag} class="en">{html.escape(p["text"])}</{tag}><p class="zh">{html.escape(p.get("translation") or "[尚未翻译]")}</p></section>'
             for f in paper.get("figures", []):

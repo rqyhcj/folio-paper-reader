@@ -189,18 +189,22 @@ def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None,
         insert_figures(after_paragraph.get("", []))
         for paragraph in paper.get("paragraphs") or []:
             insert_figures(before_paragraph.get(str(paragraph.get("id") or ""), []))
-            if paragraph.get("id") in figure_labels and paragraph.get("kind") != "heading":
+            if paragraph.get("id") in figure_labels:
                 insert_figures(after_paragraph.get(str(paragraph.get("id") or ""), []))
                 continue
-            if paragraph.get("kind") == "equation":
+            if paragraph.get("kind") == "equation" or paragraph.get("math_status") == "source-image":
                 if paragraph.get("math_status") == "source-image":
                     path = equation_paths.get(paragraph.get("id"))
                     if path is not None and Path(path).is_file():
-                        layout.figure({"page": paragraph.get("page"), "caption": "原文公式"}, Path(path))
+                        caption = "原文片段（含复杂公式）" if paragraph.get("ambiguous_inline_math") else "原文公式"
+                        layout.figure({"page": paragraph.get("page"), "caption": caption}, Path(path))
                     else:
                         layout.text("[公式原图未能导出，请查看原始 PDF]", size=9, leading=15, color=MUTED, after=14)
                 else:
                     layout.text(_clean(paragraph.get("text")), font=layout.english, after=19)
+                if paragraph.get("kind") != "equation":
+                    layout.text(_clean(paragraph.get("translation")) or "[尚未翻译]",
+                                size=10.5, leading=18.5, color=TRANSLATION, after=19)
                 insert_figures(after_paragraph.get(str(paragraph.get("id") or ""), []))
                 continue
             heading = paragraph.get("kind") == "heading"

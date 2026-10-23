@@ -10,6 +10,29 @@ import pymupdf as fitz
 from .pdf_runtime import PDF_LOCK
 
 CAPTION = re.compile(r"^(?:fig(?:ure)?\.?|图)\s*(?:s\s*)?\d", re.I)
+_SECTION_TITLE = re.compile(
+    r"^(?:abstract|introduction|background|related work|methods?|materials and methods|"
+    r"results?(?: and discussion)?|discussion|conclusions?|limitations?|"
+    r"acknowledg(?:e)?ments?|references|bibliography|appendi(?:x|ces)|"
+    r"supplementary (?:material|information)|摘要|引言|绪论|方法|结果|讨论|结论|参考文献)$", re.I)
+_NUMBERED_SECTION = re.compile(r"^(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*|[IVXLCDM]+)[.)]?\s+\S", re.I)
+
+
+def _image_label(paragraph, rect):
+    """Identify only text already visibly reproduced inside a recovered figure.
+
+    Bold diagram labels may have been classified as headings by the parser.
+    Their geometry still proves duplication, but protect conventional and
+    numbered section titles from suppression if an image region is too broad.
+    """
+    text = paragraph.get("text", "").strip()
+    if len(text) > 300 or CAPTION.match(text) or not _inside(paragraph, rect):
+        return False
+    if paragraph.get("kind") == "heading":
+        return (len(text) <= 120 and not _SECTION_TITLE.fullmatch(text)
+                and not _NUMBERED_SECTION.match(text)
+                and not re.match(r"^第[一二三四五六七八九十百\d]+[章节篇]", text))
+    return True
 
 
 def _inside(paragraph, rect):
@@ -184,9 +207,7 @@ def extract_figures(data: bytes, paragraphs: list[dict], destination: Path, pape
                             "before_paragraph_id": before, "bbox": list(rect),
                             "page_width": snapshot["bounds"][2] - snapshot["bounds"][0],
                             "page_height": snapshot["bounds"][3] - snapshot["bounds"][1],
-                            "text_paragraph_ids": [p["id"] for p in page_paras if
-                                                   p.get("kind") != "heading" and len(p["text"]) <= 300
-                                                   and not CAPTION.match(p["text"].strip()) and _inside(p, rect)],
+                            "text_paragraph_ids": [p["id"] for p in page_paras if _image_label(p, rect)],
                             "url": f"/api/papers/{paper_id}/figures/{fid}.png", "caption": caption,
                             "width": width, "height": height})
 

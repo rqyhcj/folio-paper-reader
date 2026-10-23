@@ -115,9 +115,10 @@ def delete_paper(paper_id: str):
 
 
 def translation_paragraphs(paper: dict) -> list[dict]:
-    """Formulas and labels already inside source figures do not need translation."""
+    """Skip source math, image labels and glyph runs without meaningful text."""
     labels = {pid for figure in paper.get("figures", []) for pid in figure.get("text_paragraph_ids", [])}
-    return [p for p in paper["paragraphs"] if p.get("kind") != "equation" and p["id"] not in labels]
+    return [p for p in paper["paragraphs"] if p.get("kind") != "equation" and p["id"] not in labels
+            and any(char.isalnum() for char in p.get("text", ""))]
 
 
 def refresh_progress(paper: dict) -> dict:

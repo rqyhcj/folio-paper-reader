@@ -318,6 +318,21 @@ def recover_paragraph(paragraph: dict, lines: list) -> dict:
         return paragraph
     if paragraph["kind"] == "heading":
         return paragraph
+    if any("CMEX" in span.get("font", "").upper() for line in lines for span in line.spans):
+        # Large inline roots / delimiters can decode as unrelated ASCII
+        # letters (e.g. CMEX's "q" is a radical). Preserve the entire prose
+        # region rather than presenting a convincing but false inline formula.
+        # It remains a prose paragraph so its surrounding explanation can be
+        # translated; the original display uses the same safe image endpoint
+        # as complex standalone equations.
+        box = paragraph["bbox"]
+        paragraph["source_text"] = paragraph["text"]
+        paragraph["math_status"] = "source-image"
+        paragraph["ambiguous_inline_math"] = True
+        paragraph["equation_source"] = {"page": paragraph["page"], "bbox": box}
+        paragraph["equation_image"] = {"width": max(1, round(box[2] - box[0])),
+                                       "height": max(1, round(box[3] - box[1])), "latex_available": False}
+        return paragraph
     changed = False
     texts = []
     for line in lines:

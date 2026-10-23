@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pymupdf as fitz
 
 from backend.math_recovery import keep_span_characters, recover_expression, recover_inline, recover_paragraph
-from backend.pdf_parser import _Line, _assemble_page, _read_lines, extract_pdf
+from backend.pdf_parser import _Line, _assemble_page, _attach_extension_fragments, _read_lines, extract_pdf
 
 
 def span(text, x, y=100, size=10, font="CMR10"):
@@ -125,7 +125,7 @@ def test_parser_end_to_end_stores_source_coordinates_and_typesets_simple_numbere
     assert not any("spans" in paragraph for paragraph in parsed["paragraphs"])
 
 
-def test_complex_equation_crop_includes_an_adjacent_fragment_without_relabeling_its_text():
+def test_complex_equation_fragments_become_one_complete_crop_without_duplicate_text():
     left = _Line("R = diag(", 80, 120, 180, 142, 10, False, 1, 1, 600, 800,
                  baseline=130, math_ratio=.7, spans=[span("R=diag(", 80, y=130)])
     right = _Line("E{x} (3)", 300, 120, 530, 142, 10, False, 2, 1, 600, 800,
@@ -134,6 +134,156 @@ def test_complex_equation_crop_includes_an_adjacent_fragment_without_relabeling_
     paragraphs = _assemble_page([left, right], 10)
     equation = next(paragraph for paragraph in paragraphs if paragraph["kind"] == "equation")
     assert equation["math_status"] == "source-image"
-    assert equation["bbox"][0] == 300
+    assert len(paragraphs) == 1
+    assert equation["bbox"][0] == 80
     assert equation["equation_source"]["bbox"][0] == 80
-    assert equation["text"] == equation["source_text"] == "E{x} (3)"
+    assert equation["text"] == equation["source_text"] == "R = diag( E{x} (3)"
+
+
+def math_line(text, box, *, baseline=None, font="CMMI9", block=1, equation=False):
+    x0, y0, x1, y1 = box
+    baseline = baseline if baseline is not None else y1 - 2
+    spans = [span(text, x0, y=baseline, size=9, font=font)]
+    return _Line(text, x0, y0, x1, y1, 9, False, block, 6, 612, 792,
+                 baseline=baseline, math_ratio=1 if "CM" in font else 0,
+                 equation=equation, spans=spans)
+
+
+def test_multiline_display_joins_brackets_controls_and_a_number_on_its_own_row():
+    # Geometry matches the two-row display (15) in a typical TeX two-column
+    # paper; its extension brackets decode as NUL / 01, not as usable text.
+    lines = [math_line("p'(x)=q(x)", (66, 489, 197, 501)),
+             math_line("=N(x;u,v)", (121, 504, 271, 517), block=2),
+             math_line("\x00", (139, 505, 144, 515), font="CMEX9", block=3),
+             math_line("\x01", (271, 505, 276, 515), font="CMEX9", block=4),
+             math_line("(15)", (275, 518, 290, 527), font="Helvetica", block=5),
+             math_line("where", (55, 538, 80, 549), font="Helvetica", block=6)]
+    result = _assemble_page(lines, 10)
+    assert len(result) == 2
+    equation, prose = result
+    assert equation["kind"] == "equation" and equation["math_status"] == "source-image"
+    assert equation["bbox"] == [66, 489, 290, 527]
+    assert equation["equation_source"]["bbox"] == equation["bbox"]
+    assert "(15)" in equation["source_text"]
+    assert prose["kind"] == "paragraph" and prose["text"] == "where"
+
+
+def test_radical_and_fraction_rows_form_a_complete_equation_not_letter_translation_fragments():
+    lines = [math_line("s", (159, 558, 169, 567), baseline=559, font="CMEX9"),
+             math_line("C1=", (99, 562, 157, 579), baseline=577),
+             math_line("(1-a)b", (170, 562, 242, 574), baseline=570),
+             math_line(",(16)", (243, 569, 290, 578), baseline=576, equation=True),
+             math_line("1-a", (193, 575, 218, 584), baseline=582)]
+    result = _assemble_page(lines, 10)
+    assert len(result) == 1
+    assert result[0]["kind"] == "equation"
+    assert result[0]["math_status"] == "source-image"
+    assert result[0]["bbox"] == [99, 558, 290, 584]
+
+
+def test_adjacent_displays_do_not_take_each_others_fraction_rows():
+    lines = [math_line("x=1", (100, 110, 140, 120)),
+             math_line("(1)", (275, 110, 290, 120), font="Helvetica"),
+             math_line("y=", (100, 125, 140, 137), block=2),
+             math_line("a", (145, 125, 152, 137), block=3),
+             math_line("b", (145, 138, 152, 147), block=4),
+             math_line("(2)", (275, 131, 290, 143), font="Helvetica", block=5)]
+    result = _assemble_page(lines, 10)
+    equations = [item for item in result if item["kind"] == "equation"]
+    assert len(equations) == 2
+    assert equations[0]["bbox"] == [100, 110, 290, 120]
+    assert equations[1]["bbox"] == [100, 125, 290, 147]
+
+
+def test_prose_is_a_hard_boundary_even_when_short_and_between_math_fragments():
+    lines = [math_line("x=1", (100, 100, 140, 110)),
+             math_line("where", (55, 111, 80, 121), font="Helvetica"),
+             math_line("(1)", (275, 122, 290, 132), font="Helvetica")]
+    result = _assemble_page(lines, 10)
+    equation = next(item for item in result if item["kind"] == "equation")
+    assert equation["bbox"] == [100, 100, 140, 110]
+    assert "(1)" not in equation["source_text"]
+    assert any("where" in item["text"] for item in result if item["kind"] == "paragraph")
+
+
+def test_parenthesized_chart_label_alone_does_not_become_a_formula():
+    lines = [math_line("(1)", (275, 122, 290, 132), font="Helvetica")]
+    result = _assemble_page(lines, 10)
+    assert result[0]["kind"] == "paragraph"
+
+
+def test_ambiguous_inline_radical_uses_original_prose_crop_and_keeps_translation_eligibility():
+    spans = [span("A scaling factor ", 10, font="Helvetica"), span("q", 95, font="CMEX10"),
+             span("1+x", 101)]
+    paragraph = {"text": "A scaling factor q1+x", "kind": "paragraph", "page": 6, "bbox": [10, 80, 160, 112]}
+    result = recover_paragraph(paragraph, [SimpleNamespace(spans=spans)])
+    assert result["kind"] == "paragraph"
+    assert result["ambiguous_inline_math"] is True
+    assert result["math_status"] == "source-image"
+    assert result["equation_source"] == {"page": 6, "bbox": [10, 80, 160, 112]}
+
+
+def test_plain_fraction_numerator_is_math_context_not_a_prose_separator():
+    lines = [math_line("\x12", (380, 637, 387, 646), baseline=638, font="CMEX9"),
+             math_line("\x13", (475, 637, 482, 646), baseline=638, font="CMEX9"),
+             math_line("1", (367, 637, 372, 646), font="Helvetica"),
+             math_line("x=", (328, 643, 377, 659)),
+             math_line("a-b", (387, 643, 442, 660)),
+             math_line("(10)", (527, 656, 542, 665), font="Helvetica")]
+    result = _assemble_page(lines, 10)
+    assert len(result) == 1
+    assert result[0]["kind"] == "equation"
+    assert result[0]["math_status"] == "source-image"
+    assert result[0]["bbox"] == [328, 637, 542, 665]
+
+
+def test_unnumbered_display_keeps_extension_brackets_in_one_source_crop():
+    lines = [math_line("p(x)=N(x;u,v)", (97, 362, 259, 374)),
+             math_line("\x00", (159, 364, 164, 371), font="CMEX7"),
+             math_line("\x01", (236, 364, 240, 371), font="CMEX7")]
+    result = _assemble_page(lines, 10)
+    assert len(result) == 1 and result[0]["kind"] == "equation"
+    assert result[0]["math_status"] == "source-image"
+    assert result[0]["bbox"] == [97, 362, 259, 374]
+
+
+def test_second_pass_attaches_a_bracket_just_beyond_the_assembled_prose_row():
+    body = math_line("NewtonSolve(x)=a/b", (75, 309, 240, 327), baseline=319, font="Helvetica")
+    bracket = math_line("\x11", (241, 308, 248, 318), baseline=308, font="CMEX10")
+    result = _attach_extension_fragments([body, bracket])
+    assert len(result) == 1
+    assert result[0].x1 == 248 and result[0].y0 == 308
+    assert any(span["text"] == "\x11" for span in result[0].spans)
+
+
+def test_mathematics_in_adjacent_columns_remains_two_separate_equations():
+    lines = []
+    for y in (70, 85, 190, 205):
+        lines.append(_Line("The left column describes this experiment.", 55, y, 291, y + 10,
+                           10, False, int(y), 1, 612, 792))
+        lines.append(_Line("The right column describes this experiment.", 307, y, 543, y + 10,
+                           10, False, int(y) + 1, 1, 612, 792))
+    lines.extend([math_line("x=1", (100, 120, 140, 130)),
+                  math_line("(1)", (275, 120, 290, 130), font="Helvetica"),
+                  math_line("y=2", (350, 120, 390, 130)),
+                  math_line("(2)", (528, 120, 543, 130), font="Helvetica")])
+    result = _assemble_page(lines, 10)
+    equations = [item for item in result if item["kind"] == "equation"]
+    assert len(equations) == 2
+    assert equations[0]["bbox"] == [100, 120, 290, 130]
+    assert equations[1]["bbox"] == [350, 120, 543, 130]
+
+
+def test_extension_attachment_does_not_pull_a_right_column_glyph_into_left_prose():
+    lines = []
+    for y in (70, 85, 190, 205):
+        lines.append(_Line("The left column describes this experiment.", 55, y, 296, y + 10,
+                           10, False, int(y), 1, 612, 792))
+        lines.append(_Line("The right column describes this experiment.", 304, y, 543, y + 10,
+                           10, False, int(y) + 1, 1, 612, 792))
+    left = math_line("The left sentence ends here.", (55, 120, 296, 132), baseline=130, font="Helvetica")
+    glyph = math_line("q", (301, 120, 307, 132), baseline=130, font="CMEX10")
+    lines.extend([left, glyph])
+    result = _attach_extension_fragments(lines)
+    assert glyph in result
+    assert len(left.spans) == 1

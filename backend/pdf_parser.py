@@ -16,13 +16,13 @@ from pathlib import PureWindowsPath
 import fitz
 
 from .pdf_runtime import synchronized_pdf
-from .math_recovery import expand_equation_source, keep_span_characters, recover_paragraph
+from .math_recovery import _span_text, expand_equation_source, keep_span_characters, recover_paragraph
 
 
 MAX_PAGES = 500
 MAX_TEXT_CHARS = 3_000_000
 MAX_PARAGRAPH_CHARS = 4500
-PARSE_VERSION = 3
+PARSE_VERSION = 4
 
 
 class PDFExtractionError(ValueError):
@@ -118,7 +118,7 @@ def _read_lines(page: fitz.Page, page_number: int) -> list[_Line]:
                 math_ratio=math_chars / max(1, total_chars),
                 spans=spans,
             ))
-    return _merge_line_fragments(lines)
+    return _attach_extension_fragments(_merge_line_fragments(lines))
 
 
 def _merge_line_fragments(lines: list[_Line]) -> list[_Line]:
@@ -136,8 +136,22 @@ def _merge_line_fragments(lines: list[_Line]) -> list[_Line]:
             main = max(row, key=lambda item: len(item.text))
             tolerance = max(main.size, line.size) * 0.34
             if line.baseline - main.baseline > max(main.size, line.size) * 1.2:
-                break
-            if abs(line.baseline - main.baseline) > tolerance:
+                # Earlier joins can change a row's dominant baseline. Rows are
+                # therefore not strictly baseline-sorted any more; an early
+                # break can miss a raised radical in another column.
+                continue
+            # TeX extension glyphs (large radicals / delimiters) often report
+            # their top as their baseline. Their ink still overlaps the real
+            # row, so attach that glyph geometrically instead of emitting a
+            # meaningless standalone letter such as CMEX's decoded "s".
+            def extension(item: _Line) -> bool:
+                return bool(item.spans and len(item.text) <= 4 and all(
+                    "CMEX" in span.get("font", "").upper() for span in item.spans))
+            extension_overlap = ((extension(line) or any(extension(item) for item in row))
+                                 and max(min(item.x0 for item in row) - line.x1,
+                                         line.x0 - max(item.x1 for item in row), 0) <= min(main.size, line.size) * .65
+                                 and min(max(item.y1 for item in row), line.y1) > max(min(item.y0 for item in row), line.y0))
+            if abs(line.baseline - main.baseline) > tolerance and not extension_overlap:
                 continue
             x0, x1 = min(item.x0 for item in row), max(item.x1 for item in row)
             horizontal_gap = max(x0 - line.x1, line.x0 - x1, 0)
@@ -174,6 +188,157 @@ def _merge_line_fragments(lines: list[_Line]) -> list[_Line]:
                             baseline=main.baseline, math_ratio=math_ratio, equation=equation,
                             spans=[span for item in row for span in item.spans]))
     return merged
+
+
+def _attach_extension_fragments(lines: list[_Line]) -> list[_Line]:
+    """Attach remaining tall TeX glyphs after the surrounding row is whole.
+
+    A radical or bracket can be separated from *both* sides of its text row.
+    On the first pass neither side may overlap its bbox; once the row is
+    assembled, a second geometric pass can attach that exact original glyph.
+    """
+    pending = list(lines)
+    split = _column_split(lines, _body_size([lines]))
+
+    def same_column(line: _Line, glyph: _Line) -> bool:
+        if split is None or line.x0 < split < line.x1:
+            return True
+        return ((line.x0 + line.x1) / 2 < split) == ((glyph.x0 + glyph.x1) / 2 < split)
+
+    for glyph in lines:
+        if not any(item is glyph for item in pending):
+            continue
+        if not (glyph.spans and len(glyph.text) <= 4 and all(
+                "CMEX" in span.get("font", "").upper() for span in glyph.spans)):
+            continue
+        targets = [line for line in pending if line is not glyph and len(line.text) > len(glyph.text)
+                   and same_column(line, glyph)
+                   and max(line.x0 - glyph.x1, glyph.x0 - line.x1, 0) <= glyph.size * .5
+                   and min(line.y1, glyph.y1) > max(line.y0, glyph.y0)]
+        if not targets:
+            continue
+        target = min(targets, key=lambda item: (max(item.x0 - glyph.x1, glyph.x0 - item.x1, 0),
+                                                abs(item.baseline - glyph.baseline)))
+        target.x0, target.y0 = min(target.x0, glyph.x0), min(target.y0, glyph.y0)
+        target.x1, target.y1 = max(target.x1, glyph.x1), max(target.y1, glyph.y1)
+        target.spans.extend(glyph.spans)
+        target.spans.sort(key=lambda span: span["bbox"][0])
+        target.text = _clean(_span_text(target.spans))
+        target.math_ratio = (target.math_ratio * len(target.text) + len(glyph.text)) / max(
+            1, len(target.text) + len(glyph.text))
+        pending = [line for line in pending if line is not glyph]
+    return pending
+
+
+_EQUATION_NUMBER = re.compile(r"[（(]\s*(\d+[a-z]?)\s*[）)]\s*[,.;:]?$", re.I)
+_MATH_WORDS = {"arg", "min", "max", "argmin", "argmax", "sin", "cos", "tan", "log", "ln",
+               "exp", "lim", "sup", "inf", "det", "diag", "rank", "tr", "SVD", "ReLU"}
+_RELATION = re.compile(r"[=∑∫∏≈≃≅≠≤≥∈∉∼∝←→↔⇒⇔]")
+
+
+def _math_only(line: _Line) -> bool:
+    """Distinguish equation fragments from explanatory prose and captions.
+
+    Math fonts alone are insufficient: a normal sentence can contain several
+    variables. Meaningful roman words form a hard boundary for region growth.
+    """
+    # PDF text concatenates base variables and their scripts ("x" + "t"
+    # becomes "xt"). Inspect the original fonts instead of mistaking such a
+    # mathematical run for a prose word.
+    prose_spans = [span for span in line.spans if not re.search(
+        r"CMMI|CMMIB|CMSY|CMEX|MSAM|MSBM|Math|Symbol", span.get("font", ""), re.I)]
+    words = [word for span in prose_spans for word in re.findall(r"[A-Za-z]+", span.get("text", ""))]
+    if not line.spans:
+        words = re.findall(r"[A-Za-z]+", line.text)
+    function_call = bool(_RELATION.search(line.text))
+    if any(len(word) > 1 and word not in _MATH_WORDS
+           and not (function_call and re.search(r"[a-z][A-Z]", word)) for word in words):
+        return False
+    return bool(line.equation or line.math_ratio > .18 or _RELATION.search(line.text)
+                or re.fullmatch(r"[\d\s.,+−\-]+", line.text)
+                or _EQUATION_NUMBER.fullmatch(line.text.strip(" ,.;:")))
+
+
+def _merge_equation_regions(lines: list[_Line], body_size: float) -> list[_Line]:
+    """Collect complete numbered equations before prose reading order.
+
+    Fractions, radical bars, extension glyphs and the number of a multi-line
+    display can be separate PDF blocks with unrelated baselines. Grow only
+    through nearby mathematical lines in one physical column. The complete
+    region then either recovers reliable TeX or falls back to one source crop;
+    its fragments never become separate translation requests.
+    """
+    split = _column_split(lines, body_size)
+
+    def column(line: _Line) -> str:
+        if split is None:
+            return "main"
+        if line.x1 <= split:
+            return "left"
+        if line.x0 >= split:
+            return "right"
+        return "full"
+
+    candidates = [line for line in lines if _math_only(line)]
+    numbered = [line for line in candidates if line.equation or _EQUATION_NUMBER.search(line.text)]
+    numbered_ids = {id(line) for line in numbered}
+    unnumbered = [line for line in candidates if id(line) not in numbered_ids
+                  and line.math_ratio > .18 and _RELATION.search(line.text)]
+    seeds = sorted(numbered, key=lambda item: (item.y0, item.x0)) + sorted(
+        unnumbered, key=lambda item: (item.y0, item.x0))
+    assigned: set[int] = set()
+    regions: list[_Line] = []
+    for seed in seeds:
+        if id(seed) in assigned:
+            continue
+        members = [seed]
+        member_ids = {id(seed)}
+        number = _EQUATION_NUMBER.search(seed.text)
+        number = number.group(1) if number else None
+        changed = True
+        while changed:
+            changed = False
+            for line in candidates:
+                if id(line) in assigned or id(line) in member_ids or column(line) != column(seed):
+                    continue
+                other_number = _EQUATION_NUMBER.search(line.text)
+                if other_number and other_number.group(1) != number:
+                    continue  # two nearby numbered displays remain distinct
+                center = (line.y0 + line.y1) / 2
+                distance = abs(center - (seed.y0 + seed.y1) / 2)
+                if any(other is not seed and column(other) == column(seed)
+                       and abs(center - (other.y0 + other.y1) / 2) < distance
+                       for other in numbered):
+                    continue  # do not steal the next display's unnumbered row
+                if any(max(line.y0 - member.y1, member.y0 - line.y1, 0) <= body_size * .9
+                       for member in members):
+                    # A short prose word between displays is an actual layout
+                    # separator, even if its font metrics leave only a small gap.
+                    top = min(line.y0, min(member.y0 for member in members))
+                    bottom = max(line.y1, max(member.y1 for member in members))
+                    right = max(line.x1, max(member.x1 for member in members))
+                    if any(not _math_only(item) and column(item) == column(seed)
+                           and item.x0 <= right and item.y0 > top and item.y1 < bottom for item in lines):
+                        continue
+                    members.append(line)
+                    member_ids.add(id(line))
+                    changed = True
+        # Parenthesized numbers in tables / figures are not enough evidence of
+        # an equation. Existing deliberately marked equations remain valid.
+        if not seed.equation and not any(_RELATION.search(line.text) for line in members):
+            continue
+        assigned.update(member_ids)
+        members.sort(key=lambda item: (item.y0, item.x0))
+        main = max(members, key=lambda item: len(item.text))
+        count = sum(len(item.text) for item in members)
+        regions.append(_Line(_join_lines([item.text for item in members]),
+                             min(item.x0 for item in members), min(item.y0 for item in members),
+                             max(item.x1 for item in members), max(item.y1 for item in members),
+                             main.size, False, main.block, main.page, main.width, main.height,
+                             baseline=main.baseline,
+                             math_ratio=sum(item.math_ratio * len(item.text) for item in members) / max(count, 1),
+                             equation=True, spans=[span for item in members for span in item.spans]))
+    return [line for line in lines if id(line) not in assigned] + regions
 
 
 def _margin_signature(line: _Line) -> str | None:
@@ -221,10 +386,21 @@ def _column_split(lines: list[_Line], body_size: float) -> float | None:
         return None
     width = lines[0].width
     prose = [line for line in lines if len(line.text) >= 22 and line.size >= body_size * 0.8
-             and width * .20 < line.x1 - line.x0 < width * 0.60 and not line.equation]
+             and width * .20 < line.x1 - line.x0 < width * 0.60 and not line.equation
+             # Right-aligned pseudocode comments are a second text box, not
+             # the beginning of another prose column.
+             and not re.match(r"^[▷▹]", line.text.lstrip())]
+    # The geometric center of a page need not be the center of its gutter.
+    # In particular, asymmetric margins can put a fixed percentage inside a
+    # text column. Use spaces between observed text edges as candidates too;
+    # this keeps slightly longer wrapped lines from becoming "full-width" rows.
+    edges = sorted({round(edge, 2) for line in prose for edge in (line.x0, line.x1)
+                    if width * .40 <= edge <= width * .60})
+    candidates = {width * fraction for fraction in (.45, .475, .5, .525, .55)}
+    candidates.update((left + right) / 2 for left, right in zip(edges, edges[1:])
+                      if right - left >= max(4, body_size * .5))
     best = None
-    for fraction in (0.45, 0.475, 0.5, 0.525, 0.55):
-        split = width * fraction
+    for split in sorted(candidates):
         left = [line for line in prose if line.x1 <= split - 4]
         right = [line for line in prose if line.x0 >= split + 4]
         if len(left) < 2 or len(right) < 2:
@@ -235,8 +411,11 @@ def _column_split(lines: list[_Line], body_size: float) -> float | None:
             min(line.y0 for line in left), min(line.y0 for line in right))
         if overlap < body_size * 2:
             continue
-        top = max(min(line.y0 for line in left), min(line.y0 for line in right))
-        bottom = min(max(line.y1 for line in left), max(line.y1 for line in right))
+        # Include the surrounding wrapped lines: gaps inside a justified
+        # bibliography entry can otherwise resemble a short two-column band
+        # while its immediately preceding/following prose crosses the gutter.
+        top = max(min(line.y0 for line in left), min(line.y0 for line in right)) - body_size * 2
+        bottom = min(max(line.y1 for line in left), max(line.y1 for line in right)) + body_size * 2
         spanning_prose = [line for line in lines if line.x0 < split - 4 and line.x1 > split + 4
                           and top <= (line.y0 + line.y1) / 2 <= bottom
                           and len(line.text) >= 40 and line.size >= body_size * .8 and not line.equation]
@@ -246,7 +425,7 @@ def _column_split(lines: list[_Line], body_size: float) -> float | None:
         if len(spanning_prose) >= max(2, (len(left) + len(right)) * .25):
             continue
         score = min(len(left), len(right)) * 3 + len(left) + len(right)
-        candidate = (score, -abs(fraction - 0.5), split)
+        candidate = (score, -abs(split / width - 0.5), split)
         if best is None or candidate > best:
             best = candidate
     return best[2] if best else None
@@ -333,7 +512,7 @@ def _assemble_page(lines: list[_Line], body_size: float) -> list[dict]:
     group: list[_Line] = []
     group_level: int | None = None
     group_equation = False
-    ordered = _reading_order(lines, body_size)
+    ordered = _reading_order(_merge_equation_regions(lines, body_size), body_size)
     flow_right: dict[str, float] = defaultdict(float)
     for line in ordered:
         flow_right[line.flow] = max(flow_right[line.flow], line.x1)
@@ -371,7 +550,8 @@ def _assemble_page(lines: list[_Line], body_size: float) -> list[dict]:
                           and line.x1 <= max(item.x1 for item in group) + body_size)
             preceding_limit = (line.equation and all(item.math_ratio > .35 and item.size < body_size * .90 for item in group))
             merge = (not flow_changed and -body_size < gap < body_size * 1.8
-                     and ((group_equation and (line.equation or small_math)) or preceding_limit))
+                     and not (group_equation and line.equation)
+                     and ((group_equation and small_math) or preceding_limit))
         elif group_level is not None or level is not None:
             # Two-line paper titles / section titles may share one block.
             merge = (group_level is not None and level == group_level and line.block == previous.block
@@ -380,7 +560,10 @@ def _assemble_page(lines: list[_Line], body_size: float) -> list[dict]:
                      and abs(line.size - previous.size) < 0.8)
         else:
             indentation = line.x0 - group[0].x0
-            close = -previous.size * 0.2 <= gap <= max(previous.size, line.size) * 1.75
+            # Raised radicals / accents can enlarge a line's top bbox without
+            # changing the baseline spacing of an ordinary wrapped paragraph.
+            baseline_gap = line.baseline - previous.baseline if line.baseline and previous.baseline else gap
+            close = -previous.size * 0.2 <= baseline_gap <= max(previous.size, line.size) * 1.75
             same_block = line.block == previous.block
             full_previous_line = previous.x1 >= flow_right[previous.flow] - max(24, previous.size * 3)
             # Separate PDF blocks usually denote paragraphs. Recover PDFs that

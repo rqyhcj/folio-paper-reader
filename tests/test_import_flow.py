@@ -208,6 +208,34 @@ def test_translation_skips_independent_equations_and_labels_inside_figures(clien
     assert client.post(f"/api/papers/{paper['id']}/paragraphs/{label['id']}/translate").status_code == 400
 
 
+def test_control_glyphs_and_punctuation_are_never_sent_as_translation_requests(client, monkeypatch):
+    monkeypatch.setattr(api, "extract_figures", lambda *args, **kwargs: [])
+    paper = upload(client)
+    paper = wait_for(client, paper["id"], lambda p: p["figure_status"] == "completed")
+    control, punctuation, body = paper["paragraphs"][:3]
+    control["text"] = "\x00 \x01\t"
+    punctuation["text"] = " , ; ( ) \ufffd "
+    body["text"] = "English prose and 中文正文 remain translatable."
+    db.save_paper(db.refresh_progress(paper))
+    seen = []
+
+    async def translate(text, config):
+        seen.append(text)
+        return "正常正文译文"
+
+    monkeypatch.setattr(api, "translate_text", translate)
+    monkeypatch.setattr(api, "merged_settings", lambda _: {
+        "provider": "ollama", "endpoint": "http://localhost:11434/v1/chat/completions",
+        "concurrency": 1, "api_key": ""})
+    assert client.post(f"/api/papers/{paper['id']}/translate").status_code == 200
+    complete = wait_for(client, paper["id"], lambda p: p["status"] == "completed")
+    assert seen == [body["text"]]
+    assert complete["progress"] == {"total": 1, "done": 1, "failed": 0}
+    assert not complete["paragraphs"][0]["translation"]
+    assert not complete["paragraphs"][1]["translation"]
+    assert client.post(f"/api/papers/{paper['id']}/paragraphs/{control['id']}/translate").status_code == 400
+
+
 def test_artwork_on_a_page_without_text_stays_between_neighboring_pages(tmp_path):
     with fitz.open() as document:
         document.new_page()

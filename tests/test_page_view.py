@@ -73,3 +73,25 @@ def test_equation_crop_and_pdf_export_use_original_image_and_delete_cleans_cache
     assert client.delete("/api/papers/preview-paper").status_code == 200
     assert not (db.DATA / "papers" / "preview-paper").exists()
     assert client.get("/api/papers/preview-paper/pages/1.png").status_code == 404
+
+
+def test_complex_inline_source_keeps_original_crop_and_translation_in_both_exports(source_client):
+    client, _ = source_client
+    paper = db.get_paper("preview-paper")
+    paragraph = paper["paragraphs"][0]
+    paragraph.update(kind="paragraph", ambiguous_inline_math=True,
+                     text="GarbledSourceGlyph q is not a reliable square root.",
+                     translation="正文中的复杂根号保留原图，中文翻译仍然可读。")
+    db.save_paper(db.refresh_progress(paper))
+    assert client.get("/api/papers/preview-paper/equations/p1.png").status_code == 200
+    exported = client.get("/api/papers/preview-paper/export?format=pdf")
+    assert exported.status_code == 200
+    with PDF_LOCK, fitz.open(stream=exported.content, filetype="pdf") as document:
+        text = "".join(page.get_text() for page in document)
+        assert "GarbledSourceGlyph" not in text
+        assert paragraph["translation"] in text
+        assert sum(len(page.get_image_info()) for page in document) == 1
+    html = client.get("/api/papers/preview-paper/export?format=html").text
+    assert html.count("data:image/png;base64,") == 1
+    assert "GarbledSourceGlyph" not in html
+    assert paragraph["translation"] in html
