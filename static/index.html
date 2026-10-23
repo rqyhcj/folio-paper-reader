@@ -8,14 +8,14 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/appearance.css">
-  <link rel="stylesheet" href="/providers.css">
+  <link rel="stylesheet" href="/providers.css?v=model-picker-2">
   <link rel="stylesheet" href="/vendor/katex/katex.min.css">
   <link rel="stylesheet" href="/math.css">
   <link rel="stylesheet" href="/layout.css">
   <link rel="stylesheet" href="/reading.css">
   <script defer src="/vendor/katex/katex.min.js"></script>
   <script defer id="katex-auto-render-script" src="/vendor/katex/contrib/auto-render.min.js"></script>
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/app.js?v=model-picker-2"></script>
 </head>
 <body>
   <svg class="icon-defs" aria-hidden="true"><defs>
@@ -96,7 +96,19 @@
       <label for="api-endpoint">API 地址</label>
       <input id="api-endpoint" type="url" required placeholder="完整的 Chat Completions 请求地址" spellcheck="false" autocomplete="off">
       <p class="endpoint-help">填写完整请求地址，例如以 /chat/completions 结尾；可按服务商说明修改。</p>
-      <div class="form-row"><div><label for="api-model">模型名称</label><input id="api-model" list="api-model-options" required placeholder="自行选择或输入模型" spellcheck="false" autocomplete="off"><datalist id="api-model-options"></datalist></div><div class="concurrency-field"><label for="api-concurrency">并行段落</label><select id="api-concurrency"><option value="1">1 段 · 稳定</option><option value="2">2 段 · 推荐</option><option value="3">3 段</option><option value="4">4 段</option></select></div></div>
+      <div class="form-row"><div class="model-field">
+        <label for="api-model">模型名称</label>
+        <div class="model-picker" id="api-model-picker">
+          <input id="api-model" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="api-model-options" aria-describedby="api-model-help" required placeholder="自行选择或输入模型" spellcheck="false" autocomplete="off">
+          <button type="button" id="api-model-toggle" class="model-picker-toggle" aria-label="展开模型建议" aria-expanded="false" aria-controls="api-model-options"><span aria-hidden="true">▾</span></button>
+          <div id="api-model-menu" class="model-menu" hidden>
+            <div id="api-model-options" class="model-options" role="listbox" aria-label="模型建议"></div>
+            <p id="api-model-empty" class="model-empty" role="status" hidden></p>
+            <p class="model-menu-note">请以服务商提供的模型 ID 和账号权限为准。</p>
+          </div>
+        </div>
+        <p id="api-model-help" class="model-help">可选择建议，也可手动输入模型 ID。</p>
+      </div><div class="concurrency-field"><label for="api-concurrency">并行段落</label><select id="api-concurrency"><option value="1">1 段 · 稳定</option><option value="2">2 段 · 推荐</option><option value="3">3 段</option><option value="4">4 段</option></select></div></div>
       <div class="label-row"><label for="api-key" id="api-key-label">API Key</label><button type="button" id="clear-key">清除已保存的密钥</button></div>
       <div class="password-input"><input id="api-key" type="password" placeholder="输入所选服务的 API Key" autocomplete="off" spellcheck="false"><button type="button" id="toggle-key" aria-label="显示密钥">显示</button></div>
       <p class="field-help"><svg><use href="#i-shield"/></svg><span id="api-key-help">填写该服务商提供的密钥。密钥仅保存在本机配置中，不会写入导出文稿。</span></p>

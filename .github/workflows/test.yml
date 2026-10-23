@@ -18,3 +18,5 @@ jobs:
         run: python scripts/check_release.py
       - name: Check offline math rendering
         run: node tests/test_math.cjs
+      - name: Check model picker interactions
+        run: node tests/test_model_picker.cjs

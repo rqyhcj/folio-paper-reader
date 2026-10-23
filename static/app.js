@@ -914,6 +914,116 @@ function renderProviders() {
   }));
 }
 
+const modelPicker = { suggestions: [], active: -1, filtered: false };
+
+function closeModelSuggestions() {
+  $('api-model-menu').hidden = true;
+  $('api-model').setAttribute('aria-expanded', 'false');
+  $('api-model').removeAttribute('aria-activedescendant');
+  $('api-model-toggle').setAttribute('aria-expanded', 'false');
+  $('api-model-toggle').setAttribute('aria-label', '展开模型建议');
+  modelPicker.active = -1;
+  modelPicker.filtered = false;
+}
+
+function modelSuggestions() {
+  return [...new Set((providerInfo($('api-provider').value).models || [])
+    .filter((model) => typeof model === 'string' && model.trim()))];
+}
+
+function openModelSuggestions(filter = false) {
+  if ($('api-model').disabled) return;
+  const all = modelSuggestions();
+  const query = filter ? $('api-model').value.trim().toLowerCase() : '';
+  modelPicker.filtered = !!query;
+  modelPicker.suggestions = all.filter((model) => !query || model.toLowerCase().includes(query));
+  modelPicker.active = -1;
+  $('api-model-options').replaceChildren(...modelPicker.suggestions.map((model, index) => {
+    const option = node('button', 'model-option', model);
+    option.type = 'button';
+    option.id = `api-model-option-${index}`;
+    option.tabIndex = -1;
+    option.dataset.modelIndex = String(index);
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', 'false');
+    return option;
+  }));
+  $('api-model-empty').textContent = all.length
+    ? '没有匹配的建议；可直接使用你输入的模型 ID，或点击箭头查看全部建议。'
+    : '此服务暂无预设模型，请按服务商说明手动输入模型 ID。';
+  $('api-model-empty').hidden = modelPicker.suggestions.length > 0;
+  $('api-model-menu').hidden = false;
+  $('api-model').setAttribute('aria-expanded', 'true');
+  $('api-model').removeAttribute('aria-activedescendant');
+  $('api-model-toggle').setAttribute('aria-expanded', 'true');
+  $('api-model-toggle').setAttribute('aria-label', '收起模型建议');
+}
+
+function highlightModelSuggestion(index) {
+  if (!modelPicker.suggestions.length) return;
+  modelPicker.active = (index + modelPicker.suggestions.length) % modelPicker.suggestions.length;
+  for (const [position, option] of [...$('api-model-options').children].entries()) {
+    option.setAttribute('aria-selected', String(position === modelPicker.active));
+    if (position === modelPicker.active) {
+      $('api-model').setAttribute('aria-activedescendant', option.id);
+      option.scrollIntoView({ block: 'nearest' });
+    }
+  }
+}
+
+function chooseModelSuggestion(index) {
+  const model = modelPicker.suggestions[index];
+  if (model === undefined || $('api-model').disabled) return;
+  $('api-model').value = model;
+  $('api-model').focus({ preventScroll: true });
+  closeModelSuggestions();
+  $('api-model').dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function wireModelPicker() {
+  $('api-model').addEventListener('focus', () => openModelSuggestions());
+  $('api-model').addEventListener('input', (e) => { if (!e.isComposing) openModelSuggestions(true); });
+  $('api-model').addEventListener('compositionend', () => openModelSuggestions(true));
+  $('api-model').addEventListener('keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229) return;
+    const open = !$('api-model-menu').hidden;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!open) openModelSuggestions();
+      const next = modelPicker.active < 0
+        ? (e.key === 'ArrowDown' ? 0 : modelPicker.suggestions.length - 1)
+        : modelPicker.active + (e.key === 'ArrowDown' ? 1 : -1);
+      highlightModelSuggestion(next);
+    } else if (e.key === 'Enter' && open) {
+      e.preventDefault();
+      if (modelPicker.active >= 0) chooseModelSuggestion(modelPicker.active);
+      else closeModelSuggestions();
+    } else if (e.key === 'Escape' && open) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeModelSuggestions();
+    } else if (e.key === 'Tab') closeModelSuggestions();
+  });
+  $('api-model-toggle').addEventListener('pointerdown', (e) => e.preventDefault());
+  $('api-model-toggle').addEventListener('click', () => {
+    const showAll = $('api-model-menu').hidden || modelPicker.filtered;
+    $('api-model').focus({ preventScroll: true });
+    if (showAll) openModelSuggestions();
+    else closeModelSuggestions();
+  });
+  $('api-model-options').addEventListener('pointerdown', (e) => e.preventDefault());
+  $('api-model-options').addEventListener('click', (e) => {
+    const option = e.target.closest('[data-model-index]');
+    if (option) chooseModelSuggestion(Number(option.dataset.modelIndex));
+  });
+  $('api-model-picker').addEventListener('focusout', (e) => {
+    if (!$('api-model-picker').contains(e.relatedTarget)) closeModelSuggestions();
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (!$('api-model-picker').contains(e.target)) closeModelSuggestions();
+  });
+}
+
 function renderProviderDetails() {
   const provider = providerInfo($('api-provider').value);
   $('provider-mark').textContent = provider.id === 'custom' ? '↗' : provider.name.slice(0, 1);
@@ -921,11 +1031,10 @@ function renderProviderDetails() {
   $('provider-note').textContent = provider.note || '兼容 OpenAI Chat Completions 接口';
   $('api-endpoint').placeholder = provider.endpoint || 'https://your-service.example/v1/chat/completions';
   $('api-model').placeholder = '选择建议或输入你有权限使用的模型';
-  $('api-model-options').replaceChildren(...(provider.models || []).map((model) => {
-    const option = document.createElement('option');
-    option.value = model;
-    return option;
-  }));
+  closeModelSuggestions();
+  $('api-model-help').textContent = modelSuggestions().length
+    ? '可选择建议，也可手动输入模型 ID。'
+    : '此服务暂无预设列表，请按服务商说明手动输入模型 ID。';
   $('api-key-label').textContent = provider.requires_key === false ? 'API Key（可选）' : 'API Key';
   $('api-key-help').textContent = provider.requires_key === false
     ? '本机 Ollama 通常不需要密钥。密钥仅保存在本机配置中，不会写入导出文稿。'
@@ -1004,7 +1113,8 @@ function setSettingsBusy(busy) {
   $('test-connection').disabled = busy;
   $('save-settings').disabled = busy;
   $('settings-close').disabled = busy;
-  for (const id of ['api-provider', 'api-endpoint', 'api-model', 'api-concurrency', 'api-key', 'clear-key', 'toggle-key']) {
+  if (busy) closeModelSuggestions();
+  for (const id of ['api-provider', 'api-endpoint', 'api-model', 'api-model-toggle', 'api-concurrency', 'api-key', 'clear-key', 'toggle-key']) {
     $(id).disabled = busy;
   }
 }
@@ -1076,10 +1186,11 @@ function wireEvents() {
   $('top-settings').addEventListener('click', openSettings);
   $('settings-close').addEventListener('click', () => $('settings-dialog').close());
   $('settings-dialog').addEventListener('click', (e) => { if (e.target === $('settings-dialog') && e.offsetX < 0) $('settings-dialog').close(); });
-  $('settings-dialog').addEventListener('close', () => { $('api-key').value = ''; $('api-key').type = 'password'; });
+  $('settings-dialog').addEventListener('close', () => { closeModelSuggestions(); $('api-key').value = ''; $('api-key').type = 'password'; });
   $('settings-form').addEventListener('submit', saveSettings);
   $('test-connection').addEventListener('click', testConnection);
   $('api-provider').addEventListener('change', changeProvider);
+  wireModelPicker();
   $('api-endpoint').addEventListener('input', () => {
     credentialContextChanged('API 地址已修改。为避免将密钥发送到其他地址，请重新填写该地址对应的密钥。');
   });

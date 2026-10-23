@@ -12,6 +12,20 @@
 .translation-privacy > svg { width: 15px; height: 15px; margin-top: 3px; color: var(--teal); }
 .translation-privacy p { margin: 0; font-size: 11px; line-height: 1.9; }
 .settings-dialog .field-help { margin-bottom: 23px; }
+.settings-dialog .model-field { min-width: 0; }
+.model-picker { position: relative; }
+.settings-dialog .model-picker > input { padding-right: 42px; }
+.model-picker-toggle { position: absolute; right: 3px; top: 3px; bottom: 3px; width: 35px; display: grid; place-items: center; border-radius: 4px; color: var(--text); font-size: 17px; }
+.model-picker-toggle:hover { background: var(--folio-panel-soft, var(--sidebar)); color: var(--teal); }
+.model-picker-toggle[aria-expanded="true"] > span { transform: rotate(180deg); }
+.model-picker-toggle:disabled { opacity: .45; cursor: default; }
+.model-menu { position: absolute; z-index: 8; top: calc(100% + 6px); left: 0; right: 0; padding: 5px; background: var(--folio-panel, var(--canvas)); border: 1px solid var(--line); border-radius: 7px; box-shadow: 0 9px 28px #0002; }
+.model-options { max-height: 190px; overflow-y: auto; scrollbar-width: thin; }
+.model-option { display: block; width: 100%; padding: 9px 10px; border-radius: 4px; font-family: var(--sans); font-size: 13px; line-height: 1.6; color: var(--text); text-align: left; overflow-wrap: anywhere; }
+.model-option:hover,.model-option[aria-selected="true"] { background: var(--folio-panel-soft, var(--sidebar)); color: var(--folio-accent-ink, var(--teal)); }
+.model-empty { margin: 0; padding: 10px; font-size: 12px; line-height: 1.8; color: var(--muted); overflow-wrap: anywhere; }
+.model-menu-note { margin: 4px 4px 0; padding: 8px 5px 3px; border-top: 1px solid var(--line); font-size: 10px; line-height: 1.7; color: var(--muted); }
+.model-help { margin: 8px 0 0; font-size: 11px; line-height: 1.7; color: var(--muted); }
 .paper-figure { margin: 28px 0 35px; padding: 15px; border: 1px solid var(--line); border-radius: 10px; background: var(--canvas); break-inside: avoid; }
 .figure-image-link { display: block; position: relative; text-align: center; border-radius: 5px; overflow: hidden; }
 .figure-image-link img { display: block; max-width: 100%; height: auto; margin: 0 auto; object-fit: contain; background: #fff; }
