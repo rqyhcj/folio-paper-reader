@@ -3,65 +3,210 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import time
+from collections.abc import Callable
 import pymupdf as fitz
+
+from .pdf_runtime import PDF_LOCK
 
 CAPTION = re.compile(r"^(?:fig(?:ure)?\.?|图)\s*(?:s\s*)?\d", re.I)
 
 
-def _regions(page):
-    bounds = page.rect
+def _inside(paragraph, rect):
+    bbox = paragraph.get("bbox")
+    if not bbox or len(bbox) != 4:
+        return False
+    area = _area(bbox)
+    return area > 0 and _area(_intersect(bbox, rect)) / area >= .9
+
+
+def _area(rect):
+    return max(0, rect[2] - rect[0]) * max(0, rect[3] - rect[1])
+
+
+def _intersect(a, b):
+    return max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
+
+
+def _union(a, b):
+    return min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])
+
+
+def _cluster_rectangles(rectangles, bounds, should_stop=None):
+    """Run the upstream neighborhood/expanding-bounds rules on plain tuples.
+
+    Rules are adapted from PyMuPDF Page.cluster_drawings (AGPL-3.0; see NOTICE).
+    Duplicate path boxes cannot alter expanding bounds and are removed first.
+    Tiny unique paths are retained because they can connect neighboring parts.
+    This function makes no MuPDF calls and must run outside PDF_LOCK.
+    """
+    stopped = should_stop or (lambda: False)
+    pending = sorted({tuple(r) for r in rectangles if r[0] >= bounds[0] and r[2] <= bounds[2]
+                      and r[1] >= bounds[1] and r[3] <= bounds[3]}, key=lambda r: (r[3], r[0]))
+    result = []
+    while pending:
+        if stopped():
+            return []
+        rect = pending[0]
+        repeat = True
+        while repeat:
+            repeat = False
+            for index in range(len(pending) - 1, 0, -1):
+                if index % 1024 == 0 and stopped():
+                    return []
+                other = pending[index]
+                # Use normalized endpoints, matching upstream degenerate-line handling.
+                ax0, ax1 = (rect[0], rect[2]) if rect[2] > rect[0] else (rect[2], rect[0])
+                ay0, ay1 = (rect[1], rect[3]) if rect[3] > rect[1] else (rect[3], rect[1])
+                bx0, bx1 = (other[0], other[2]) if other[2] > other[0] else (other[2], other[0])
+                by0, by1 = (other[1], other[3]) if other[3] > other[1] else (other[3], other[1])
+                if not (ax1 < bx0 - 3 or ax0 > bx1 + 3 or ay1 < by0 - 3 or ay0 > by1 + 3):
+                    rect = _union(rect, other)
+                    del pending[index]
+                    repeat = True
+        result.append(rect)
+        del pending[0]
+        pending.sort(key=lambda r: (r[3], r[0]))
+    return [r for r in sorted(set(result), key=lambda r: (r[3], r[0])) if r[2] - r[0] > 3 and r[3] - r[1] > 3]
+
+
+def _page_snapshot(page):
+    """Copy only the coordinates/text needed later while MuPDF is locked."""
+    try:
+        drawings = page.get_cdrawings()
+        rectangles = [tuple(path["rect"]) for path in drawings if "rect" in path]
+    except Exception:
+        rectangles = []
+    blocks = page.get_text("blocks", flags=fitz.TEXTFLAGS_BLOCKS & ~fitz.TEXT_PRESERVE_IMAGES)
+    captions = [(tuple(b[:4]), re.sub(r"\s+", " ", b[4]).strip()) for b in blocks if
+                len(b) > 4 and isinstance(b[4], str) and CAPTION.match(b[4].strip())]
+    return {"bounds": tuple(page.rect), "images": [tuple(image["bbox"]) for image in page.get_image_info()],
+            "drawings": rectangles, "captions": captions}
+
+
+def _regions(snapshot, should_stop=None):
+    bounds = snapshot["bounds"]
     regions = []
-    for image in page.get_image_info():
-        rect = fitz.Rect(image["bbox"]) & bounds
-        if rect.width >= 35 and rect.height >= 30 and 1200 < rect.get_area() < bounds.get_area() * .92:
+    for image in snapshot["images"]:
+        rect = _intersect(image, bounds)
+        if rect[2] - rect[0] >= 35 and rect[3] - rect[1] >= 30 and 1200 < _area(rect) < _area(bounds) * .92:
             regions.append(rect)
     # Vector plots and diagrams are common in scholarly PDFs.
-    try:
-        clusters = page.cluster_drawings()
-    except Exception:
-        clusters = []
+    clusters = _cluster_rectangles(snapshot["drawings"], bounds, should_stop)
     for cluster in clusters:
-        rect = fitz.Rect(cluster) & bounds
-        if rect.width >= 55 and rect.height >= 38 and rect.get_area() < bounds.get_area() * .8:
+        rect = _intersect(cluster, bounds)
+        if rect[2] - rect[0] >= 55 and rect[3] - rect[1] >= 38 and _area(rect) < _area(bounds) * .8:
             regions.append(rect)
     merged = []
-    for candidate in sorted(regions, key=lambda r: r.get_area(), reverse=True):
-        if any((candidate & existing).get_area() >= candidate.get_area() * .8 for existing in merged):
+    for candidate in sorted(regions, key=_area, reverse=True):
+        if any(_area(_intersect(candidate, existing)) >= _area(candidate) * .8 for existing in merged):
             continue
-        overlapping = [r for r in merged if (candidate + (-8, -8, 8, 8)).intersects(r)]
+        expanded = candidate[0] - 8, candidate[1] - 8, candidate[2] + 8, candidate[3] + 8
+        overlapping = [r for r in merged if _area(_intersect(expanded, r)) > 0]
         if overlapping:
             for existing in overlapping:
-                candidate |= existing
+                candidate = _union(candidate, existing)
                 merged.remove(existing)
         merged.append(candidate)
-    return sorted(merged, key=lambda r: (r.y0, r.x0))
+    return sorted(merged, key=lambda r: (r[1], r[0]))
 
 
-def extract_figures(data: bytes, paragraphs: list[dict], destination: Path, paper_id: str) -> list[dict]:
+def _anchors(rect, page_paras, caption):
+    """Keep art beside its original text, before a following caption/body block."""
+    # Labels already reproduced inside the image cannot be placement anchors.
+    page_paras = [p for p in page_paras if not _inside(p, rect)]
+    if not page_paras:
+        return None, None
+    following = []
+    for index, paragraph in enumerate(page_paras):
+        bbox = paragraph.get("bbox")
+        if bbox and len(bbox) == 4:
+            overlap = max(0, min(bbox[2], rect[2]) - max(bbox[0], rect[0]))
+            if bbox[1] >= rect[3] - 3 and overlap >= min(bbox[2] - bbox[0], rect[2] - rect[0]) * .25:
+                following.append((bbox[1] - rect[3], index, paragraph))
+    caption_index = next((i for i, p in enumerate(page_paras) if caption and
+                          (caption[:45].lower() in p["text"].lower() or p["text"][:45].lower() in caption.lower())), None)
+    if caption_index is not None:
+        before_index = caption_index
+    elif following:
+        before_index = min(following, key=lambda item: (item[0], item[1]))[1]
+    else:
+        before_index = None
+    if before_index is not None:
+        # after remains a usable fallback for older exporters/clients.
+        after_index = max(0, before_index - 1)
+        return page_paras[after_index]["id"], page_paras[before_index]["id"]
+    return page_paras[-1]["id"], None
+
+
+def extract_figures(data: bytes, paragraphs: list[dict], destination: Path, paper_id: str,
+                    *, on_progress: Callable | None = None,
+                    should_stop: Callable[[], bool] | None = None) -> list[dict]:
     figures = []
     total_bytes = 0
+    stopped = should_stop or (lambda: False)
+    if stopped():
+        return figures
     destination.mkdir(parents=True, exist_ok=True)
-    with fitz.open(stream=data, filetype="pdf") as document:
-        for page_index, page in enumerate(document):
-            page_paras = [p for p in paragraphs if p["page"] == page_index + 1]
-            if not page_paras:
-                continue
-            blocks = page.get_text("blocks")
-            captions = [(fitz.Rect(b[:4]), re.sub(r"\s+", " ", b[4]).strip()) for b in blocks if len(b) > 4 and isinstance(b[4], str) and CAPTION.match(b[4].strip())]
-            for rect in _regions(page):
-                if len(figures) >= 300 or total_bytes > 80 * 1024 * 1024:
-                    return figures
-                candidates = [(box, text) for box, text in captions if abs(box.y0 - rect.y1) < 160 and box.x1 > rect.x0 and box.x0 < rect.x1]
-                caption = min(candidates, key=lambda item: abs(item[0].y0 - rect.y1))[1] if candidates else ""
-                anchor = next((p for p in page_paras if caption and (caption[:45].lower() in p["text"].lower() or p["text"][:45].lower() in caption.lower())), page_paras[-1])
-                crop = (rect + (-6, -6, 6, 6)) & page.rect
-                scale = min(1.8, 1600 / crop.width, 1800 / crop.height)
-                pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=crop, alpha=False)
-                content = pixmap.tobytes("png")
-                fid = f"f-{len(figures) + 1}"
-                (destination / f"{fid}.png").write_bytes(content)
-                total_bytes += len(content)
-                figures.append({"id": fid, "page": page_index + 1, "after_paragraph_id": anchor["id"],
-                                "url": f"/api/papers/{paper_id}/figures/{fid}.png", "caption": caption,
-                                "width": pixmap.width, "height": pixmap.height})
+    def render_crop(page, rect):
+        crop = (fitz.Rect(rect) + (-6, -6, 6, 6)) & page.rect
+        scale = min(1.8, 1600 / crop.width, 1800 / crop.height)
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=crop, alpha=False)
+        return pixmap.tobytes("png"), pixmap.width, pixmap.height
+
+    def extract_page(snapshot, page_index):
+        nonlocal total_bytes
+        page_paras = [p for p in paragraphs if p["page"] == page_index + 1]
+        captions = snapshot["captions"]
+        for rect in _regions(snapshot, stopped):
+            if stopped():
+                return
+            if len(figures) >= 300 or total_bytes > 80 * 1024 * 1024:
+                return
+            candidates = [(box, text) for box, text in captions if abs(box[1] - rect[3]) < 160 and box[2] > rect[0] and box[0] < rect[2]]
+            caption = min(candidates, key=lambda item: abs(item[0][1] - rect[3]))[1] if candidates else ""
+            after, before = _anchors(rect, page_paras, caption)
+            if after is None and before is None:
+                previous = [p for p in paragraphs if p["page"] < page_index + 1]
+                following = [p for p in paragraphs if p["page"] > page_index + 1]
+                after = previous[-1]["id"] if previous else None
+                before = following[0]["id"] if following else None
+            with PDF_LOCK:
+                if stopped():
+                    return
+                content, width, height = render_crop(document[page_index], rect)
+            if stopped():
+                return
+            fid = f"f-{len(figures) + 1}"
+            (destination / f"{fid}.png").write_bytes(content)
+            total_bytes += len(content)
+            figures.append({"id": fid, "page": page_index + 1, "after_paragraph_id": after,
+                            "before_paragraph_id": before, "bbox": list(rect),
+                            "page_width": snapshot["bounds"][2] - snapshot["bounds"][0],
+                            "page_height": snapshot["bounds"][3] - snapshot["bounds"][1],
+                            "text_paragraph_ids": [p["id"] for p in page_paras if
+                                                   p.get("kind") != "heading" and len(p["text"]) <= 300
+                                                   and not CAPTION.match(p["text"].strip()) and _inside(p, rect)],
+                            "url": f"/api/papers/{paper_id}/figures/{fid}.png", "caption": caption,
+                            "width": width, "height": height})
+
+    with PDF_LOCK:
+        document = fitz.open(stream=data, filetype="pdf")
+        page_count = len(document)
+    try:
+        for page_index in range(page_count):
+            if stopped():
+                break
+            with PDF_LOCK:
+                snapshot = _page_snapshot(document[page_index])
+            extract_page(snapshot, page_index)
+            if on_progress:
+                on_progress(list(figures), page_index + 1, page_count)
+            if len(figures) >= 300 or total_bytes > 80 * 1024 * 1024:
+                break
+            # Let a newly queued text import acquire the runtime before the next page.
+            time.sleep(.01)
+    finally:
+        with PDF_LOCK:
+            document.close()
     return figures

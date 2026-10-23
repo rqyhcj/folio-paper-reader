@@ -5,10 +5,11 @@ import { renderMath, splitMathText } from './math.js';
 const $ = (id) => document.getElementById(id);
 const icon = (name) => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const state = {
-  papers: [], paper: null, settings: null, providers: [], poll: null, loading: false,
+  papers: [], paper: null, settings: null, providers: [], poll: null, loading: false, importing: false,
   loadToken: 0, keyDirty: false, search: '', hits: [], hitIndex: -1,
   fontSize: Number(localStorage.getItem('folio.fontSize')) || 18,
-  bilingual: true, blocks: new Map(), figures: new Map(), outlineSignature: '', scrollFrame: null,
+  bilingual: true, readMode: 'bilingual', originalPage: 1, originalPaperId: null, originalScrollFrame: null,
+  blocks: new Map(), figures: new Map(), outlineSignature: '', scrollFrame: null,
 };
 
 function node(tag, className, text) {
@@ -18,10 +19,15 @@ function node(tag, className, text) {
   return el;
 }
 
-function toast(message, error = false) {
+function toast(message, error = false, action = null) {
   const el = node('div', `toast${error ? ' error' : ''}`, message);
+  if (action) {
+    const button = node('button', 'toast-action', action.label);
+    button.addEventListener('click', () => { action.run(); el.remove(); });
+    el.append(button);
+  }
   $('toasts').append(el);
-  setTimeout(() => el.remove(), error ? 6500 : 4000);
+  setTimeout(() => el.remove(), action ? 9000 : error ? 6500 : 4000);
 }
 
 async function api(path, options = {}) {
@@ -83,8 +89,8 @@ function renderLibrary() {
     const meta = node('div', 'library-item-meta');
     meta.append(node('span', '', `${paper.page_count || 0} 页`));
     const done = paper.translated_count || 0;
-    const total = paper.paragraph_count || 0;
-    const label = done >= total && total > 0 ? '已完成' : done > 0 ? `已译 ${Math.round(done / total * 100)}%` : '待翻译';
+    const total = paper.progress?.total ?? paper.paragraph_count ?? 0;
+    const label = paper.status === 'completed' || done >= total && total > 0 ? '已完成' : done > 0 ? `已译 ${Math.min(100, Math.round(done / Math.max(1, total) * 100))}%` : '待翻译';
     meta.append(node('span', '', label));
     content.append(meta);
     item.append(content);
@@ -132,6 +138,8 @@ function showWelcome() {
   $('outline-count').textContent = '';
   $('outline-empty').hidden = false;
   showView('welcome');
+  $('original-pdf-pages').replaceChildren();
+  state.originalPaperId = null;
   switchSidebarTab('library');
   renderLibrary();
   localStorage.removeItem('folio.lastPaper');
@@ -166,27 +174,41 @@ async function loadPaper(id) {
 }
 
 async function importPaper(file) {
-  if (!file || state.loading) return;
+  if (!file || state.importing) return;
   if (!/\.pdf$/i.test(file.name)) { toast('请选择 PDF 格式的论文文件。', true); return; }
   if (file.size > 50 * 1024 * 1024) { toast('PDF 不能超过 50 MB，请选择较小的文件。', true); return; }
-  clearTimeout(state.poll);
+  // Import is independent of navigation: keep the current article usable and polling.
   const token = ++state.loadToken;
-  loading('正在整理你的论文', `正在提取「${file.name}」的文字与章节…`);
+  // A previously requested article must not replace the newly imported one later.
+  if (state.loading) {
+    state.loading = false;
+    showView(state.paper ? 'reader' : 'welcome');
+    schedulePoll();
+  }
+  state.importing = true;
+  for (const id of ['sidebar-import', 'welcome-import']) $(id).disabled = true;
+  $('drop-zone').setAttribute('aria-disabled', 'true');
+  $('import-status').hidden = false;
+  $('import-status-text').textContent = `正在导入「${file.name}」· 优先提取正文，插图随后在后台整理`;
   closeSidebar();
   const form = new FormData();
   form.append('file', file);
   try {
     const paper = await api('/papers', { method: 'POST', body: form });
-    if (token !== state.loadToken) return;
-    displayPaper(paper, true);
-    toast('论文已加入文献库。点击「全文翻译」开始双语阅读。');
+    updateSummary(paper);
+    if (token === state.loadToken) {
+      displayPaper(paper, true);
+      toast('正文已就绪，可以先读。点击「全文翻译」后，译文会逐段显示。');
+    } else {
+      toast(`「${paper.title || file.name}」已加入文献库。`, false, { label: '打开论文', run: () => loadPaper(paper.id) });
+    }
   } catch (error) {
-    if (token !== state.loadToken) return;
-    state.loading = false;
-    showView(state.paper ? 'reader' : 'welcome');
     toast(error.message, true);
-    schedulePoll();
   } finally {
+    state.importing = false;
+    $('import-status').hidden = true;
+    for (const id of ['sidebar-import', 'welcome-import']) $(id).disabled = false;
+    $('drop-zone').setAttribute('aria-disabled', 'false');
     $('pdf-input').value = '';
   }
 }
@@ -209,6 +231,7 @@ async function loadDemo() {
 }
 
 function displayPaper(paper, fresh = false) {
+  const newDocument = state.paper?.id !== paper.id;
   const wasDemo = state.paper?.id === paper.id && state.paper?.is_demo;
   state.paper = paper;
   if (wasDemo) state.paper.is_demo = true;
@@ -224,6 +247,14 @@ function displayPaper(paper, fresh = false) {
   $('paper-translated').hidden = !(paper.translated_count > 0);
   $('open-original').href = `/api/papers/${encodeURIComponent(paper.id)}/original`;
   $('open-original').hidden = !!isDemo(paper);
+  $('original-pdf-fallback').href = $('open-original').href;
+  $('view-pdf').disabled = !!isDemo(paper);
+  $('view-pdf').title = isDemo(paper) ? '示例文稿没有原始 PDF，请导入自己的论文体验原版阅读' : '保留论文原有双栏、图片及公式的位置';
+  if (newDocument) {
+    state.originalPage = 1;
+    $('original-pdf-pages').replaceChildren();
+    state.originalPaperId = null;
+  }
   const notice = isDemo(paper) ? '示例文稿 · 本文为演示阅读排版而创作，内容与译文仅用于体验，不是真实发表的论文。你可以导入自己的 PDF，开启正式阅读。' : (paper.warnings || []).join(' ');
   $('paper-notice').hidden = !notice;
   $('paper-notice').textContent = notice;
@@ -244,6 +275,8 @@ function displayPaper(paper, fresh = false) {
   renderFigures();
   renderOutline();
   renderTranslationStatus();
+  renderFigureStatus();
+  setReadingMode(state.readMode === 'pdf' && isDemo(paper) ? 'bilingual' : state.readMode);
   updateSummary(paper);
   localStorage.setItem('folio.lastPaper', paper.id);
   schedulePoll();
@@ -284,9 +317,17 @@ function paragraphText(element, text) {
 
 function renderParagraphs(force = false) {
   const paragraphs = state.paper?.paragraphs || [];
+  const figureTextIds = new Set((state.paper?.figures || []).flatMap((figure) => Array.isArray(figure.text_paragraph_ids) ? figure.text_paragraph_ids.map(String) : []));
   let searchChanged = false;
   for (const paragraph of paragraphs) {
     const id = String(paragraph.id);
+    // The figure already contains these labels at their original coordinates.
+    // Keep source text and translations in storage; suppress only confirmed duplicates here.
+    if (paragraph.kind !== 'heading' && figureTextIds.has(id)) {
+      const duplicate = state.blocks.get(id);
+      if (duplicate) { duplicate.remove(); state.blocks.delete(id); searchChanged = true; }
+      continue;
+    }
     let block = state.blocks.get(id);
     if (!block) {
       block = node('section', `paragraph-block${paragraph.kind === 'heading' ? ' is-heading' : ''}`);
@@ -295,20 +336,56 @@ function renderParagraphs(force = false) {
       block.dataset.level = paragraph.level || 1;
       block.dataset.page = paragraph.page || 1;
       block.append(node('span', 'paragraph-page', `P.${paragraph.page || 1}`));
-      block.append(node(paragraph.kind === 'heading' ? 'h2' : 'p', 'paragraph-original'));
+      block.append(node(paragraph.kind === 'heading' ? 'h2' : 'div', 'paragraph-original'));
       block.append(node('div', 'paragraph-translation'));
       state.blocks.set(id, block);
       $('paragraphs').append(block);
     }
     const text = paragraph.text || '';
     const translation = translatedText(paragraph);
-    const signature = JSON.stringify([text, translation, paragraph.error, state.search, state.paper.status]);
+    const retainedParts = !translation && Array.isArray(paragraph.previous_translation_parts)
+      ? paragraph.previous_translation_parts.filter((part) => typeof part.translation === 'string' && part.translation.trim()) : [];
+    const signature = JSON.stringify([text, translation, paragraph.error, state.search, paragraph.math_status, paragraph.equation_image, retainedParts]);
     if (!force && block.dataset.signature === signature) continue;
     block.dataset.signature = signature;
-    paragraphText(block.querySelector('.paragraph-original'), text);
+    const original = block.querySelector('.paragraph-original');
+    const sourceEquation = paragraph.math_status === 'source-image' && paragraph.equation_image;
+    original.classList.toggle('has-equation-source', !!sourceEquation);
+    if (sourceEquation) renderEquationSource(original, paragraph);
+    else {
+      delete original.dataset.equationSignature;
+      paragraphText(original, text);
+      if (paragraph.math_status === 'latex' && paragraph.equation_source && !original.querySelector('.equation-original-link')) {
+        const source = node('a', 'equation-original-link', '查看原式 ↗');
+        source.href = `/api/papers/${encodeURIComponent(state.paper.id)}/equations/${encodeURIComponent(paragraph.id)}.png`;
+        source.target = '_blank';
+        source.rel = 'noopener';
+        original.append(source);
+      }
+    }
     const target = block.querySelector('.paragraph-translation');
     target.className = 'paragraph-translation';
+    target.hidden = !translation && !paragraph.error && !retainedParts.length;
+    block.classList.toggle('has-translation', !!translation || retainedParts.length > 0);
+    block.classList.toggle('has-translation-error', !!paragraph.error && !translation);
     if (translation) paragraphText(target, translation);
+    else if (retainedParts.length) {
+      delete target.dataset.textSignature;
+      delete target.dataset.mathSearchHit;
+      target.classList.add('partial');
+      target.replaceChildren(node('small', 'retained-translation-note', '已保存的部分译文，继续翻译可补全'));
+      for (const part of retainedParts) {
+        const fragment = node('div', 'retained-translation-part');
+        paragraphText(fragment, part.translation);
+        target.append(fragment);
+      }
+      if (paragraph.error) {
+        const retry = node('button', 'retained-translation-retry', '重试此段');
+        retry.title = paragraph.error;
+        retry.addEventListener('click', () => retryParagraph(paragraph.id, retry));
+        target.append(retry);
+      }
+    }
     else if (paragraph.error) {
       delete target.dataset.textSignature;
       delete target.dataset.mathSearchHit;
@@ -323,13 +400,74 @@ function renderParagraphs(force = false) {
     } else {
       delete target.dataset.textSignature;
       delete target.dataset.mathSearchHit;
-      target.classList.add('pending');
-      target.innerHTML = icon('translate');
-      target.append(node('span', '', state.paper.status === 'translating' ? '译文正在路上…' : '点击「全文翻译」，在原文下方阅读中文译文。'));
+      // Empty translations take no space. A single instruction lives in the article header.
+      target.replaceChildren();
     }
     searchChanged = true;
   }
   if (state.search && searchChanged) updateSearchHits(false);
+}
+
+function renderEquationSource(element, paragraph) {
+  const signature = JSON.stringify([state.paper.id, paragraph.id, paragraph.text, paragraph.equation_image]);
+  if (element.dataset.equationSignature === signature) return;
+  element.dataset.equationSignature = signature;
+  delete element.dataset.textSignature;
+  delete element.dataset.mathSearchHit;
+  element.replaceChildren();
+  const url = `/api/papers/${encodeURIComponent(state.paper.id)}/equations/${encodeURIComponent(paragraph.id)}.png`;
+  const link = node('a', 'equation-source-link');
+  link.href = url;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.title = '在新窗口查看原数学公式';
+  const image = document.createElement('img');
+  image.loading = 'lazy';
+  image.decoding = 'async';
+  image.alt = `第 ${paragraph.page || 1} 页的原数学公式`;
+  const dimensions = paragraph.equation_image;
+  if (Number(dimensions.width) > 0 && Number(dimensions.height) > 0) {
+    image.width = Math.min(10000, Number(dimensions.width));
+    image.height = Math.min(10000, Number(dimensions.height));
+    // PDF coordinates are points; scale the source glyphs with the reader text.
+    image.style.width = `${Math.min(10000, Number(dimensions.width)) / 11}em`;
+  }
+  const note = node('small', 'equation-source-note');
+  const noteText = node('span', '', '原式（复杂公式保留原图）');
+  note.append(noteText, imageRetryButton(image, url));
+  image.addEventListener('error', () => { image.hidden = true; noteText.textContent = '原式图片暂未加载，可重试或打开原版 PDF 查看。'; });
+  image.addEventListener('load', () => { image.hidden = false; noteText.textContent = '原式（复杂公式保留原图）'; });
+  image.src = url;
+  link.append(image);
+  element.append(link, note);
+  if (paragraph.text) {
+    const details = node('details', 'equation-extracted-source');
+    details.append(node('summary', '', '查看抽取文字'), node('code', '', paragraph.text));
+    element.append(details);
+  }
+}
+
+function imageRetryButton(image, url) {
+  const button = node('button', 'image-retry', '重试加载');
+  button.type = 'button';
+  button.hidden = true;
+  button.addEventListener('click', () => {
+    button.disabled = true;
+    button.textContent = '重新加载中…';
+    image.hidden = false;
+    image.src = `${url}${url.includes('?') ? '&' : '?'}retry=${Date.now()}`;
+  });
+  image.addEventListener('error', () => {
+    button.hidden = false;
+    button.disabled = false;
+    button.textContent = '重试加载';
+  });
+  image.addEventListener('load', () => {
+    button.hidden = true;
+    button.disabled = false;
+    button.textContent = '重试加载';
+  });
+  return button;
 }
 
 function figureURL(value) {
@@ -382,17 +520,23 @@ function renderFigures() {
         link.append(image, node('span', 'figure-open-label', '查看原图 ↗'));
         block.append(link);
       }
-      block.append(fallback, node('figcaption', '', caption));
+      const captionNode = node('figcaption', '', caption);
+      const compactCaption = caption.replace(/\s+/g, ' ').trim();
+      captionNode.hidden = (state.paper.paragraphs || []).some((paragraph) => Number(paragraph.page || 1) === Number(figure.page || 1) && (paragraph.text || '').replace(/\s+/g, ' ').trim() === compactCaption);
+      block.append(fallback, captionNode);
     }
-    let anchor = state.blocks.get(String(figure.after_paragraph_id));
+    const beforeAnchor = figure.before_paragraph_id == null ? null : state.blocks.get(String(figure.before_paragraph_id));
+    let anchor = beforeAnchor || state.blocks.get(String(figure.after_paragraph_id));
     if (!anchor) {
       const preceding = (state.paper.paragraphs || []).filter((paragraph) => Number(paragraph.page || 1) <= Number(figure.page || 1));
       anchor = state.blocks.get(String(preceding[preceding.length - 1]?.id));
     }
-    const anchorId = anchor?.dataset.paragraphId || 'end';
-    const previous = tails.get(anchorId) || anchor;
+    const anchorId = `${beforeAnchor ? 'before' : 'after'}:${anchor?.dataset.paragraphId || 'end'}`;
+    const previous = tails.get(anchorId) || (beforeAnchor ? null : anchor);
     if (previous) {
       if (block.previousElementSibling !== previous) previous.after(block);
+    } else if (beforeAnchor) {
+      if (block.nextElementSibling !== beforeAnchor) beforeAnchor.before(block);
     } else if (block.parentElement !== $('paragraphs')) $('paragraphs').append(block);
     tails.set(anchorId, block);
   }
@@ -426,6 +570,7 @@ function renderOutline() {
     const item = node('button', 'outline-item');
     item.dataset.level = Math.min(3, Number(section.level) || 1);
     item.dataset.paragraphId = String(section.paragraph_id ?? section.id);
+    item.dataset.page = Number(section.page) || 1;
     const title = node('span', 'outline-title');
     title.append(node('span', 'outline-english', section.title));
     const translation = headingTranslations.get(item.dataset.paragraphId);
@@ -434,8 +579,11 @@ function renderOutline() {
     item.append(node('span', 'outline-page', String(section.page || '')));
     item.title = section.title;
     item.addEventListener('click', () => {
-      const target = state.blocks.get(item.dataset.paragraphId);
-      target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (state.readMode === 'pdf') setOriginalPage(item.dataset.page);
+      else {
+        const target = state.blocks.get(item.dataset.paragraphId);
+        target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
       closeSidebar();
     });
     fragment.append(item);
@@ -451,6 +599,7 @@ function renderTranslationStatus() {
   const total = paper.progress?.total ?? paper.paragraph_count ?? paragraphs.length;
   const done = paper.progress?.done ?? paper.translated_count ?? paragraphs.filter((p) => !!p.translation).length;
   const failed = paper.progress?.failed ?? paragraphs.filter((p) => !!p.error && !p.translation).length;
+  const noTextToTranslate = total === 0 && paragraphs.length > 0;
   const running = paper.status === 'translating';
   const paused = paper.status === 'paused';
   const completed = paper.status === 'completed' || done >= total && total > 0;
@@ -464,14 +613,27 @@ function renderTranslationStatus() {
   $('translation-progress').style.width = `${Math.min(100, total ? done / total * 100 : 0)}%`;
   $('retry-failed').hidden = !failed || running;
   const button = $('translate-button');
-  button.innerHTML = `${icon(running ? 'pause' : completed ? 'check' : 'spark')}<span>${running ? '暂停翻译' : completed ? '翻译完成' : paused || done ? '继续翻译' : '全文翻译'}</span>`;
-  button.disabled = completed && !failed;
-  button.title = running ? '暂停后会保留已完成的译文' : completed ? '所有段落均已完成翻译' : '用当前配置的模型逐段翻译';
+  button.innerHTML = `${icon(running ? 'pause' : completed || noTextToTranslate ? 'check' : 'spark')}<span>${running ? '暂停翻译' : noTextToTranslate ? '无需翻译' : completed ? '翻译完成' : paused || done ? '继续翻译' : '全文翻译'}</span>`;
+  button.disabled = noTextToTranslate || completed && !failed;
+  button.title = running ? '暂停后会保留已完成的译文' : noTextToTranslate ? '当前文稿没有需要翻译的正文段落' : completed ? '所有正文段落均已完成翻译' : '用当前配置的模型逐段翻译';
+  $('reader-help').hidden = noTextToTranslate || running || done > 0 || !!paper.error || !!failed || !state.bilingual;
+}
+
+function renderFigureStatus() {
+  const paper = state.paper;
+  const status = paper?.figure_status;
+  const badge = $('paper-figures');
+  badge.hidden = !status || status === 'completed';
+  if (badge.hidden) return;
+  const progress = paper.figure_progress;
+  const pages = progress?.total ? ` ${Math.min(progress.done || 0, progress.total)} / ${progress.total} 页` : '';
+  badge.textContent = status === 'extracting' || status === 'pending' ? `插图后台整理中${pages}` : status === 'paused' ? '插图等待继续整理' : '部分插图未提取';
+  badge.title = '正文和翻译可正常阅读；原版 PDF 随时可查看完整图片与公式。';
 }
 
 function schedulePoll() {
   clearTimeout(state.poll);
-  if (state.paper?.status !== 'translating') return;
+  if (state.paper?.status !== 'translating' && !['extracting', 'pending'].includes(state.paper?.figure_status)) return;
   const id = state.paper.id;
   state.poll = setTimeout(async () => {
     try {
@@ -547,6 +709,16 @@ async function deletePaper(paper) {
 
 function updateReadingPosition() {
   if (!state.paper || $('reader-view').hidden) return;
+  if (state.readMode === 'pdf') {
+    const page = state.originalPage;
+    const items = [...$('outline-list').querySelectorAll('.outline-item')];
+    let current = null;
+    for (const item of items) if (Number(item.dataset.page) <= page) current = item;
+    for (const item of items) item.classList.toggle('active', item === current);
+    $('reading-location').textContent = `原版 PDF · 定位到第 ${page} 页 / 共 ${state.paper.page_count || 1} 页`;
+    $('read-progress').textContent = '';
+    return;
+  }
   const scroll = $('reader-scroll');
   const max = scroll.scrollHeight - scroll.clientHeight;
   $('read-progress').textContent = `${max > 0 ? Math.min(100, Math.round(scroll.scrollTop / max * 100)) : 100}%`;
@@ -577,17 +749,101 @@ function setFontSize(size) {
 }
 
 function setBilingual(value) {
-  state.bilingual = value;
-  $('paper-article').classList.toggle('original-only', !value);
-  $('view-bilingual').classList.toggle('active', value);
-  $('view-original').classList.toggle('active', !value);
-  $('view-bilingual').setAttribute('aria-pressed', String(value));
-  $('view-original').setAttribute('aria-pressed', String(!value));
-  if (state.search) updateSearchHits(true);
+  setReadingMode(value ? 'bilingual' : 'original');
+}
+
+function setReadingMode(mode) {
+  const modeChanged = state.readMode !== mode;
+  const pdf = mode === 'pdf';
+  state.readMode = mode;
+  state.bilingual = mode === 'bilingual';
+  $('paper-article').classList.toggle('original-only', !state.bilingual);
+  $('reader-view').classList.toggle('showing-original-pdf', pdf);
+  $('reader-scroll').hidden = pdf;
+  $('original-pdf-view').hidden = !pdf;
+  for (const [id, active] of [['view-bilingual', state.bilingual], ['view-original', mode === 'original'], ['view-pdf', pdf]]) {
+    $(id).classList.toggle('active', active);
+    $(id).setAttribute('aria-pressed', String(active));
+  }
+  $('toggle-search').disabled = pdf;
+  $('toggle-search').title = pdf ? '切回双语阅读或原文重排，可搜索文字' : '搜索文内内容';
+  if (pdf) {
+    if (!$('search-bar').hidden) closeSearch();
+    const created = renderOriginalPages();
+    if (modeChanged || created) setOriginalPage(state.originalPage);
+  }
+  if (state.paper) renderTranslationStatus();
+  if (state.search && modeChanged) updateSearchHits(true);
   requestAnimationFrame(updateReadingPosition);
 }
 
+function renderOriginalPages() {
+  if (!state.paper || isDemo(state.paper) || state.originalPaperId === state.paper.id) return false;
+  const fragment = document.createDocumentFragment();
+  const paperId = state.paper.id;
+  for (let page = 1; page <= (Number(state.paper.page_count) || 1); page++) {
+    const figure = node('figure', 'original-pdf-page');
+    figure.id = `original-pdf-page-${page}`;
+    figure.dataset.page = page;
+    const image = document.createElement('img');
+    image.loading = 'lazy';
+    image.decoding = 'async';
+    image.alt = `论文原版第 ${page} 页，完整保留该页图文位置`;
+    const dimensions = state.paper.page_dimensions?.[page - 1];
+    image.width = Number(dimensions?.width) || 1190;
+    image.height = Number(dimensions?.height) || 1684;
+    const fallback = node('p', 'original-page-error', `第 ${page} 页暂未显示。可在下方打开原 PDF 查看。`);
+    fallback.hidden = true;
+    const url = `/api/papers/${encodeURIComponent(paperId)}/pages/${page}.png`;
+    fallback.append(imageRetryButton(image, url));
+    image.addEventListener('error', () => { image.hidden = true; fallback.hidden = false; });
+    image.addEventListener('load', () => { image.hidden = false; fallback.hidden = true; });
+    image.src = url;
+    figure.append(image, fallback, node('figcaption', '', `第 ${page} 页`));
+    fragment.append(figure);
+  }
+  $('original-pdf-pages').replaceChildren(fragment);
+  state.originalPaperId = paperId;
+  return true;
+}
+
+function syncOriginalPageControls() {
+  const total = Math.max(1, Number(state.paper?.page_count) || 1);
+  const page = state.originalPage;
+  $('original-page').value = page;
+  $('original-page').max = total;
+  $('original-page-total').textContent = `/ ${total}`;
+  $('original-page-prev').disabled = page <= 1;
+  $('original-page-next').disabled = page >= total;
+}
+
+function setOriginalPage(value) {
+  if (!state.paper || isDemo(state.paper)) return;
+  const total = Math.max(1, Number(state.paper.page_count) || 1);
+  const page = Math.max(1, Math.min(total, Math.trunc(Number(value)) || 1));
+  state.originalPage = page;
+  syncOriginalPageControls();
+  const target = $(`original-pdf-page-${page}`);
+  target?.scrollIntoView({ block: 'start', behavior: 'instant' });
+  updateReadingPosition();
+}
+
+function updateOriginalPageFromScroll() {
+  if (state.readMode !== 'pdf' || !state.paper) return;
+  const region = $('original-pdf-pages');
+  const top = region.getBoundingClientRect().top + 60;
+  let page = 1;
+  for (const element of region.children) {
+    if (element.getBoundingClientRect().top <= top) page = Number(element.dataset.page) || page;
+    else break;
+  }
+  state.originalPage = page;
+  if (document.activeElement !== $('original-page')) syncOriginalPageControls();
+  updateReadingPosition();
+}
+
 function openSearch() {
+  if (state.readMode === 'pdf') return;
   $('search-bar').hidden = false;
   $('document-search').focus();
 }
@@ -801,8 +1057,8 @@ function wireEvents() {
   $('brand-home').addEventListener('click', (e) => { e.preventDefault(); if (!state.loading) showWelcome(); });
   $('sidebar-import').addEventListener('click', () => $('pdf-input').click());
   $('welcome-import').addEventListener('click', (e) => { e.stopPropagation(); $('pdf-input').click(); });
-  $('drop-zone').addEventListener('click', () => $('pdf-input').click());
-  $('drop-zone').addEventListener('keydown', (e) => { if (e.target === $('drop-zone') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); $('pdf-input').click(); } });
+  $('drop-zone').addEventListener('click', () => { if (!state.importing) $('pdf-input').click(); });
+  $('drop-zone').addEventListener('keydown', (e) => { if (!state.importing && e.target === $('drop-zone') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); $('pdf-input').click(); } });
   $('pdf-input').addEventListener('change', (e) => importPaper(e.target.files[0]));
   let dragDepth = 0;
   $('drop-zone').addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth++; $('drop-zone').classList.add('dragging'); });
@@ -836,6 +1092,19 @@ function wireEvents() {
   $('font-plus').addEventListener('click', () => setFontSize(state.fontSize + 1));
   $('view-bilingual').addEventListener('click', () => setBilingual(true));
   $('view-original').addEventListener('click', () => setBilingual(false));
+  $('view-pdf').addEventListener('click', () => setReadingMode('pdf'));
+  $('original-page-prev').addEventListener('click', () => setOriginalPage(state.originalPage - 1));
+  $('original-page-next').addEventListener('click', () => setOriginalPage(state.originalPage + 1));
+  $('original-page').addEventListener('change', () => setOriginalPage($('original-page').value));
+  $('original-page').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); setOriginalPage($('original-page').value); } });
+  $('original-zoom').addEventListener('change', () => {
+    $('original-pdf-pages').style.setProperty('--original-page-scale', $('original-zoom').value);
+    setOriginalPage(state.originalPage);
+  });
+  $('original-pdf-pages').addEventListener('scroll', () => {
+    if (state.originalScrollFrame) return;
+    state.originalScrollFrame = requestAnimationFrame(() => { state.originalScrollFrame = null; updateOriginalPageFromScroll(); });
+  }, { passive: true });
   $('toggle-search').addEventListener('click', () => $('search-bar').hidden ? openSearch() : closeSearch());
   $('search-close').addEventListener('click', closeSearch);
   $('document-search').addEventListener('input', () => { state.search = $('document-search').value.trim(); renderParagraphs(true); updateSearchHits(true); });
@@ -849,7 +1118,7 @@ function wireEvents() {
   $('reader-scroll').addEventListener('scroll', () => { if (state.scrollFrame) return; state.scrollFrame = requestAnimationFrame(() => { state.scrollFrame = null; updateReadingPosition(); }); }, { passive: true });
   window.addEventListener('resize', updateReadingPosition);
   document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && state.paper && !$('settings-dialog').open && !$('confirm-dialog').open) { e.preventDefault(); openSearch(); }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && state.paper && state.readMode !== 'pdf' && !$('settings-dialog').open && !$('confirm-dialog').open) { e.preventDefault(); openSearch(); }
     if (e.key === 'Escape') { $('export-menu').hidden = true; closeSidebar(); if (!$('search-bar').hidden && !$('settings-dialog').open) closeSearch(); }
   });
 }

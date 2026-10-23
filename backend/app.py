@@ -7,7 +7,10 @@ import html
 import io
 import base64
 import os
+import shutil
 from pathlib import Path
+from threading import Event
+from time import monotonic
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
@@ -26,8 +29,12 @@ from .providers import PROVIDERS, requires_key
 from .figures import extract_figures
 from .pdf_export import export_pdf
 from .math_html import offline_math_assets
+from .page_view import equation_png, router as page_view_router
+from .pdf_runtime import PDF_LOCK
 
 jobs: dict[str, asyncio.Task] = {}
+figure_jobs: dict[str, asyncio.Task] = {}
+FIGURE_VERSION = 2
 MAX_UPLOAD = 50 * 1024 * 1024
 
 
@@ -35,7 +42,7 @@ MAX_UPLOAD = 50 * 1024 * 1024
 async def lifespan(app):
     db.init_storage()
     yield
-    active = list(jobs.values())
+    active = list(jobs.values()) + list(figure_jobs.values())
     for task in active:
         task.cancel()
     await asyncio.gather(*active, return_exceptions=True)
@@ -98,17 +105,84 @@ def figure_dir(paper_id: str) -> Path:
 
 
 def ensure_figures(paper: dict, raw: bytes | None = None) -> dict:
-    if "figures" in paper:
+    """Schedule artwork separately; neither import nor opening a paper waits for it."""
+    paper_id = paper["id"]
+    if paper_id in figure_jobs and not figure_jobs[paper_id].done():
         return paper
-    paper["figures"] = []
+    if paper.get("figure_version") == FIGURE_VERSION and paper.get("figure_status") in ("completed", "error"):
+        return paper
     source = db.DATA / "papers" / f"{paper['id']}.pdf"
-    if not paper.get("is_demo") and (raw is not None or source.exists()):
-        try:
-            paper["figures"] = extract_figures(raw if raw is not None else source.read_bytes(), paper["paragraphs"], figure_dir(paper["id"]), paper["id"])
-        except Exception:
-            paper["figures_error"] = "部分插图未能提取，可打开原 PDF 查看。"
+    if paper.get("is_demo") or (raw is None and not source.exists()):
+        paper.update(figures=paper.get("figures", []), figure_status="completed", figure_version=FIGURE_VERSION,
+                     figure_progress={"done": paper.get("page_count", 0), "total": paper.get("page_count", 0)})
+        db.save_paper(paper)
+        return paper
+    paper.update(figures=[], figure_status="extracting", figure_version=FIGURE_VERSION,
+                 figure_progress={"done": 0, "total": paper.get("page_count", 0)})
+    paper.pop("figures_error", None)
     db.save_paper(paper)
+    figure_jobs[paper_id] = asyncio.create_task(figure_job(paper_id, raw))
     return paper
+
+
+async def figure_job(paper_id: str, raw: bytes | None = None):
+    """Publish each completed page on the event loop, preserving concurrent translations."""
+    stop = Event()
+    worker = None
+    last_publish = 0.0
+    loop = asyncio.get_running_loop()
+
+    def publish(figures, done, total):
+        # All read/modify/save operations run on the same event loop as translation.
+        # A cancelled/deleted job must never resurrect a paper or its old text.
+        if stop.is_set():
+            return
+        current = db.get_paper(paper_id)
+        if current is not None:
+            current.update(figures=figures, figure_progress={"done": done, "total": total})
+            db.save_paper(db.refresh_progress(current))
+
+    def progress(figures, done, total):
+        nonlocal last_publish
+        if not stop.is_set():
+            now = monotonic()
+            if done < total and now - last_publish < .2:
+                return
+            last_publish = now
+            loop.call_soon_threadsafe(publish, figures, done, total)
+
+    try:
+        initial = db.get_paper(paper_id)
+        if initial is None:
+            return
+        data = raw if raw is not None else await asyncio.to_thread((db.DATA / "papers" / f"{paper_id}.pdf").read_bytes)
+        worker = asyncio.create_task(asyncio.to_thread(extract_figures, data, initial["paragraphs"],
+                                                       figure_dir(paper_id), paper_id,
+                                                       on_progress=progress, should_stop=stop.is_set))
+        figures = await asyncio.shield(worker)
+        current = db.get_paper(paper_id)
+        if current is not None:
+            current.update(figures=figures, figure_status="completed", figure_version=FIGURE_VERSION,
+                           figure_progress={"done": current.get("page_count", 0), "total": current.get("page_count", 0)})
+            db.save_paper(db.refresh_progress(current))
+    except asyncio.CancelledError:
+        stop.set()
+        # Wait for the extractor's next safe checkpoint before deleting its files.
+        if worker is not None:
+            await asyncio.gather(worker, return_exceptions=True)
+        current = db.get_paper(paper_id)
+        if current is not None:
+            current["figure_status"] = "pending"
+            db.save_paper(current)
+        raise
+    except Exception:
+        current = db.get_paper(paper_id)
+        if current is not None:
+            current.update(figure_status="error", figures_error="部分插图未能提取，可打开原 PDF 查看。")
+            db.save_paper(current)
+    finally:
+        stop.set()
+        figure_jobs.pop(paper_id, None)
 
 
 def merged_settings(payload: SettingsInput) -> dict:
@@ -199,8 +273,8 @@ async def import_paper(file: UploadFile = File(...)):
     paper_id = uuid4().hex
     paper = db.refresh_progress(dict(result, id=paper_id, filename=filename, created_at=datetime.now(timezone.utc).isoformat(), status="idle", error=None, is_demo=False))
     (db.DATA / "papers" / f"{paper_id}.pdf").write_bytes(raw)
-    await asyncio.to_thread(ensure_figures, paper, bytes(raw))
-    return paper
+    db.save_paper(paper)
+    return ensure_figures(paper, bytes(raw))
 
 
 @app.get("/api/demo")
@@ -213,14 +287,14 @@ def demo():
 
 
 @app.get("/api/papers/{paper_id}")
-def get_paper(paper_id: str):
+async def get_paper(paper_id: str):
     return ensure_figures(paper_or_404(paper_id))
 
 
 async def translation_job(paper_id: str, config: dict, paragraph_ids: list[str] | None = None):
     try:
         initial = paper_or_404(paper_id)
-        pending = paragraph_ids if paragraph_ids is not None else [p["id"] for p in initial["paragraphs"] if not p.get("translation")]
+        pending = paragraph_ids if paragraph_ids is not None else [p["id"] for p in db.translation_paragraphs(initial) if not p.get("translation")]
         queue = asyncio.Queue()
         for pid in pending:
             queue.put_nowait(pid)
@@ -229,7 +303,10 @@ async def translation_job(paper_id: str, config: dict, paragraph_ids: list[str] 
             while not queue.empty():
                 pid = queue.get_nowait()
                 paper = paper_or_404(paper_id)
-                source = next(p for p in paper["paragraphs"] if p["id"] == pid)
+                source = next((p for p in db.translation_paragraphs(paper) if p["id"] == pid), None)
+                if source is None:
+                    queue.task_done()
+                    continue
                 try:
                     translated = await translate_text(source["text"], config)
                     error = None
@@ -252,7 +329,7 @@ async def translation_job(paper_id: str, config: dict, paragraph_ids: list[str] 
                     child.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
         paper = db.refresh_progress(paper_or_404(paper_id))
-        paper["status"] = "error" if paper["progress"]["failed"] else ("completed" if paper["translated_count"] == paper["paragraph_count"] else "paused")
+        paper["status"] = "error" if paper["progress"]["failed"] else ("completed" if paper["translated_count"] == paper["progress"]["total"] else "paused")
         paper["error"] = "部分段落未完成，点击继续翻译可重试。" if paper["progress"]["failed"] else None
         db.save_paper(paper)
     except asyncio.CancelledError:
@@ -277,12 +354,12 @@ async def start_translation(paper_id: str, payload: TranslateInput = TranslateIn
         return paper
     if any(not task.done() for task in jobs.values()):
         raise HTTPException(409, "已有一篇论文正在翻译，请先暂停后切换。")
-    if all(p.get("translation") for p in paper["paragraphs"]):
+    if all(p.get("translation") for p in db.translation_paragraphs(paper)):
         return paper
     config = merged_settings(SettingsInput())
     if requires_key(config) and not config.get("api_key"):
         raise HTTPException(400, "请先在 API 设置中填写密钥。")
-    for p in paper["paragraphs"]:
+    for p in db.translation_paragraphs(paper):
         if not p.get("translation"):
             p["error"] = None
     paper.update(status="translating", error=None)
@@ -309,6 +386,8 @@ async def retry_paragraph(paper_id: str, paragraph_id: str):
     paragraph = next((p for p in paper["paragraphs"] if p["id"] == paragraph_id), None)
     if not paragraph:
         raise HTTPException(404, "未找到这个段落。")
+    if paragraph_id not in {p["id"] for p in db.translation_paragraphs(paper)}:
+        raise HTTPException(400, "该内容为公式或原图内文字，无需逐段翻译。")
     config = merged_settings(SettingsInput())
     if requires_key(config) and not config.get("api_key"):
         raise HTTPException(400, "请先在 API 设置中填写密钥。")
@@ -328,21 +407,31 @@ async def retry_paragraph(paper_id: str, paragraph_id: str):
 async def remove_paper(paper_id: str):
     paper = paper_or_404(paper_id)
     await pause_translation(paper_id)
+    task = figure_jobs.get(paper_id)
+    if task and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
     db.delete_paper(paper_id)
-    (db.DATA / "papers" / f"{paper_id}.pdf").unlink(missing_ok=True)
-    directory = figure_dir(paper_id)
-    if directory.resolve().is_relative_to((db.DATA / "papers").resolve()) and directory.exists():
-        for image in directory.glob("f-*.png"):
-            image.unlink(missing_ok=True)
-        if not any(directory.iterdir()):
-            directory.rmdir()
-            directory.parent.rmdir()
+
+    def remove_files():
+        root = (db.DATA / "papers").resolve()
+        source = (root / f"{paper_id}.pdf").resolve()
+        directory = (root / paper_id).resolve()
+        if source.parent != root or directory == root or not directory.is_relative_to(root):
+            return
+        # A page render already in progress finishes before its cache is removed.
+        with PDF_LOCK:
+            source.unlink(missing_ok=True)
+            if directory.exists():
+                shutil.rmtree(directory)
+
+    await asyncio.to_thread(remove_files)
     return {"ok": True}
 
 
 @app.get("/api/papers/{paper_id}/figures/{figure_id}.png")
-def original_figure(paper_id: str, figure_id: str):
-    paper = ensure_figures(paper_or_404(paper_id))
+async def original_figure(paper_id: str, figure_id: str):
+    paper = paper_or_404(paper_id)
     if figure_id not in {f["id"] for f in paper.get("figures", [])}:
         raise HTTPException(404, "未找到插图。")
     path = figure_dir(paper_id) / f"{figure_id}.png"
@@ -360,27 +449,70 @@ def original(paper_id: str):
 
 
 @app.get("/api/papers/{paper_id}/export")
-def export(paper_id: str, format: str = "markdown"):
-    paper = ensure_figures(paper_or_404(paper_id))
-    title = paper["title"]
+async def export(paper_id: str, format: str = "markdown"):
+    paper = paper_or_404(paper_id)
     if format not in ("markdown", "html", "pdf"):
         raise HTTPException(400, "支持导出 markdown、html 或 pdf。")
+    if format in ("pdf", "html"):
+        ensure_figures(paper)
+        task = figure_jobs.get(paper_id)
+        if task and not task.done():
+            await asyncio.shield(task)
+        paper = paper_or_404(paper_id)
+    title = paper["title"]
+    equation_paths = {}
+    if format in ("pdf", "html"):
+        for paragraph in paper["paragraphs"]:
+            if paragraph.get("kind") == "equation" and paragraph.get("math_status") == "source-image":
+                try:
+                    equation_paths[paragraph["id"]] = await asyncio.to_thread(equation_png, paper, paragraph["id"])
+                except Exception:
+                    # Exporters render a readable placeholder when the original crop is unavailable.
+                    pass
     if format == "pdf":
         paths = {f["id"]: figure_dir(paper_id) / f"{f['id']}.png" for f in paper.get("figures", [])}
-        content = export_pdf(paper, paths)
+        content = await asyncio.to_thread(export_pdf, paper, paths, equation_paths)
         media, extension = "application/pdf", "pdf"
     elif format == "html":
         sections = []
+        inserted = set()
+
+        def image_html(figure):
+            if figure["id"] in inserted:
+                return ""
+            inserted.add(figure["id"])
+            path = figure_dir(paper_id) / f"{figure['id']}.png"
+            if path.is_file():
+                encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+                art = f'<img style="max-width:100%;height:auto" src="data:image/png;base64,{encoded}" alt="原文插图">'
+            else:
+                art = "<p>[插图文件缺失，请在原始 PDF 中查看]</p>"
+            return f'<figure>{art}<figcaption>{html.escape(figure.get("caption") or "原文插图")}</figcaption></figure>'
+
+        hidden = {pid for f in paper.get("figures", []) for pid in f.get("text_paragraph_ids", [])}
         for p in paper["paragraphs"]:
+            if p["id"] in hidden:
+                continue
             tag = "h2" if p["kind"] == "heading" else "p"
-            section = f'<section><{tag} class="en">{html.escape(p["text"])}</{tag}><p class="zh">{html.escape(p.get("translation") or "[尚未翻译]")}</p></section>'
-            for f in paper.get("figures", []):
-                if f["after_paragraph_id"] == p["id"]:
-                    path = figure_dir(paper_id) / f"{f['id']}.png"
-                    if path.is_file():
+            section = "".join(image_html(f) for f in paper.get("figures", []) if f.get("before_paragraph_id") == p["id"])
+            if p.get("kind") == "equation":
+                if p.get("math_status") == "source-image":
+                    path = equation_paths.get(p["id"])
+                    if path is not None and path.is_file():
                         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-                        section += f'<figure><img style="max-width:100%;height:auto" src="data:image/png;base64,{encoded}" alt="原文插图"><figcaption>{html.escape(f.get("caption") or "原文插图")}</figcaption></figure>'
+                        equation = f'<img style="max-width:100%;height:auto" src="data:image/png;base64,{encoded}" alt="原文数学公式">'
+                    else:
+                        equation = "<p>[公式原图未能导出，请查看原始 PDF]</p>"
+                else:
+                    equation = f'<p class="en">{html.escape(p["text"])}</p>'
+                section += f'<section class="equation">{equation}</section>'
+            else:
+                section += f'<section><{tag} class="en">{html.escape(p["text"])}</{tag}><p class="zh">{html.escape(p.get("translation") or "[尚未翻译]")}</p></section>'
+            for f in paper.get("figures", []):
+                if not f.get("before_paragraph_id") and f.get("after_paragraph_id") == p["id"]:
+                    section += image_html(f)
             sections.append(section)
+        sections.extend(image_html(f) for f in paper.get("figures", []) if f["id"] not in inserted)
         body = "".join(sections)
         content = f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{html.escape(title)}</title><style>body{{max-width:820px;margin:64px auto;padding:0 24px;color:#273638;background:#faf9f6;line-height:1.9}}h1{{line-height:1.3}}.en{{font-family:Georgia,serif;font-size:18px}}.zh{{font-family:system-ui;color:#476364;font-size:17px}}section{{margin:32px 0}}h2{{font-size:24px}}@media print{{body{{margin:0;background:white}}}}</style><h1>{html.escape(title)}</h1><p>纸间 · 英中对照阅读</p>{body}</html>'
         media, extension = "text/html", "html"
@@ -393,6 +525,7 @@ def export(paper_id: str, format: str = "markdown"):
     return Response(content, media_type=media, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(title[:100] + '.' + extension)}"})
 
 
+app.include_router(page_view_router)
 app.mount("/", StaticFiles(directory=db.ROOT / "static", html=True), name="static")
 
 

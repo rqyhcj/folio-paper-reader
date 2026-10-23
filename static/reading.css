@@ -1,0 +1,58 @@
+/* Untranslated paragraphs flow continuously; space is reserved only for real content. */
+.paragraph-block { margin-bottom: .85em; }
+.paragraph-block.has-translation { margin-bottom: 1.5em; }
+.paragraph-block.is-heading { margin-top: 1.8em; margin-bottom: .9em; }
+.paragraph-translation { margin-top: .55em; padding-top: .55em; padding-bottom: .55em; }
+.paragraph-translation[hidden] { display: none !important; }
+.retained-translation-note { display: block; margin-bottom: 6px; color: var(--muted); font: 11px/1.7 var(--sans); }
+.retained-translation-part + .retained-translation-part { margin-top: .6em; }
+.retained-translation-retry { margin-top: 6px; color: var(--teal); font: 11px/1.7 var(--sans); text-decoration: underline; text-underline-offset: 3px; }
+.paragraph-original { white-space: normal; }
+.reader-help { margin: 17px 0 0; font: 12px/1.8 var(--sans); color: var(--muted); }
+.equation-source-link { display: block; width: fit-content; max-width: 100%; }
+.equation-source-link img { display: block; max-width: 100%; height: auto; background: #fff; border-radius: 3px; }
+.equation-source-note, .equation-original-link { display: block; margin-top: 5px; font: 11px/1.7 var(--sans); color: var(--muted); }
+.equation-original-link { text-align: right; }
+.equation-original-link:hover { color: var(--teal); }
+.image-retry { margin-left: 10px; padding: 2px 5px; font: inherit; color: var(--folio-accent-ink, var(--teal)); text-decoration: underline; text-underline-offset: 3px; }
+.image-retry:disabled { opacity: .65; cursor: wait; }
+.equation-extracted-source { margin-top: 4px; font: 11px/1.7 var(--sans); color: var(--muted); }
+.equation-extracted-source summary { width: fit-content; cursor: pointer; }
+.equation-extracted-source code { display: block; padding: 7px 10px; margin-top: 5px; overflow-wrap: anywhere; white-space: pre-wrap; background: var(--folio-panel-soft, var(--canvas)); border: 1px solid var(--line); border-radius: 4px; }
+.figure-status { color: var(--muted); }
+.paper-figure { margin-top: 1.25em; margin-bottom: 1.5em; }
+
+/* Import work never covers the currently readable article. */
+.import-status { display: flex; align-items: center; gap: 10px; flex-shrink: 0; padding: 10px 22px; border-bottom: 1px solid var(--line); background: var(--folio-panel-soft, var(--canvas)); color: var(--text); font: 12px/1.6 var(--sans); }
+.import-status > span:nth-child(2) { overflow-wrap: anywhere; }
+.import-status > small { margin-left: auto; flex-shrink: 0; color: var(--muted); }
+.import-spinner { width: 15px; height: 15px; flex: 0 0 15px; border: 2px solid var(--line); border-top-color: var(--teal); border-radius: 50%; animation: spin 1s linear infinite; }
+.toast-action { margin-left: 12px; text-decoration: underline; text-underline-offset: 3px; font-size: inherit; color: inherit; }
+
+/* The actual PDF is a separate view, so reflow never pretends to preserve page geometry. */
+.original-pdf-view { min-height: 0; flex: 1; display: flex; flex-direction: column; background: var(--canvas); }
+.original-pdf-navigation { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 5px 15px; padding: 7px 20px; border-bottom: 1px solid var(--line); color: var(--muted); background: var(--folio-panel, var(--canvas)); font: 11px/1.6 var(--sans); }
+.original-page-controls { display: flex; align-items: center; gap: 8px; }
+.original-page-controls .icon-button { width: 27px; height: 27px; }
+.original-page-controls input, .original-page-controls select { padding: 3px 4px; border: 1px solid var(--line); border-radius: 4px; text-align: center; font: inherit; color: var(--text); background: var(--folio-control, var(--canvas)); }
+.original-page-controls input { width: 55px; }
+.original-pdf-pages { flex: 1; min-height: 200px; overflow: auto; padding-bottom: 12px; background: var(--folio-panel-soft, var(--canvas)); scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }
+.original-pdf-page { width: calc((100% - 32px) * var(--original-page-scale, 1)); margin: 16px auto 0; scroll-margin-top: 12px; }
+.original-pdf-page img { display: block; width: 100%; height: auto; background: #fff; box-shadow: 0 1px 6px #00000015; }
+.original-pdf-page figcaption { padding: 5px 0 0; text-align: center; color: var(--muted); font: 10px/1.7 var(--sans); }
+.original-page-error { margin: 0; padding: 28px; border: 1px dashed var(--line); color: var(--muted); background: var(--canvas); font: 12px/1.8 var(--sans); }
+.original-pdf-note { display: flex; flex-wrap: wrap; align-items: center; gap: 0 4px; padding: 7px 20px; color: var(--muted); font: 11px/1.7 var(--sans); border-top: 1px solid var(--line); }
+.original-pdf-note a { color: var(--folio-accent-ink, var(--teal)); }
+.original-pdf-note a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.showing-original-pdf .font-control, .showing-original-pdf #layout-fluid-toggle { display: none; }
+.view-switch button:disabled { opacity: .45; cursor: default; }
+@media (max-width: 740px) {
+  .paragraph-block { margin-bottom: .8em; }
+  .paragraph-block.has-translation { margin-bottom: 1.25em; }
+  .import-status { padding: 8px 14px; font-size: 11px; }
+  .import-status > small { display: none; }
+  .original-pdf-navigation { padding: 6px 13px; }
+  .original-pdf-note { padding: 6px 13px; font-size: 10px; }
+  .original-page-controls { gap: 6px; }
+  .original-page-controls label { display: none; }
+}

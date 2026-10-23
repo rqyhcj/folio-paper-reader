@@ -99,7 +99,7 @@ def get_paper(paper_id: str) -> dict | None:
 
 
 def summarize(paper: dict) -> dict:
-    return {k: paper.get(k) for k in ("id", "title", "filename", "page_count", "paragraph_count", "translated_count", "created_at", "status", "is_demo")}
+    return {k: paper.get(k) for k in ("id", "title", "filename", "page_count", "paragraph_count", "translated_count", "progress", "created_at", "status", "is_demo")}
 
 
 def list_papers(full=False) -> list[dict]:
@@ -114,10 +114,16 @@ def delete_paper(paper_id: str):
         con.execute("DELETE FROM papers WHERE id = ?", (paper_id,))
 
 
+def translation_paragraphs(paper: dict) -> list[dict]:
+    """Formulas and labels already inside source figures do not need translation."""
+    labels = {pid for figure in paper.get("figures", []) for pid in figure.get("text_paragraph_ids", [])}
+    return [p for p in paper["paragraphs"] if p.get("kind") != "equation" and p["id"] not in labels]
+
+
 def refresh_progress(paper: dict) -> dict:
-    paragraphs = paper["paragraphs"]
+    paragraphs = translation_paragraphs(paper)
     done = sum(bool(p.get("translation")) for p in paragraphs)
     failed = sum(bool(p.get("error")) and not p.get("translation") for p in paragraphs)
-    paper.update(paragraph_count=len(paragraphs), translated_count=done,
+    paper.update(paragraph_count=len(paper["paragraphs"]), translated_count=done,
                  progress={"total": len(paragraphs), "done": done, "failed": failed})
     return paper

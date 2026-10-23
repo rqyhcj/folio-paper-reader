@@ -10,15 +10,19 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import PureWindowsPath
 
 import fitz
+
+from .pdf_runtime import synchronized_pdf
+from .math_recovery import expand_equation_source, keep_span_characters, recover_paragraph
 
 
 MAX_PAGES = 500
 MAX_TEXT_CHARS = 3_000_000
 MAX_PARAGRAPH_CHARS = 4500
+PARSE_VERSION = 3
 
 
 class PDFExtractionError(ValueError):
@@ -39,6 +43,10 @@ class _Line:
     width: float
     height: float
     flow: str = "main"
+    baseline: float = 0.0
+    math_ratio: float = 0.0
+    equation: bool = False
+    spans: list[dict] = field(default_factory=list)
 
 
 _LIGATURES = str.maketrans({
@@ -60,7 +68,7 @@ def _clean(text: str) -> str:
 def _read_lines(page: fitz.Page, page_number: int) -> list[_Line]:
     lines = []
     flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_IMAGES
-    for block_number, block in enumerate(page.get_text("dict", sort=False, flags=flags)["blocks"]):
+    for block_number, block in enumerate(page.get_text("rawdict", sort=False, flags=flags)["blocks"]):
         if block.get("type") != 0:
             continue
         for item in block.get("lines", []):
@@ -73,9 +81,14 @@ def _read_lines(page: fitz.Page, page_number: int) -> list[_Line]:
             previous = None
             weights: Counter[float] = Counter()
             bold_chars = 0
+            math_chars = 0
             total_chars = 0
+            baselines: Counter[float] = Counter()
             for span in spans:
-                text = span.get("text", "")
+                text = "".join(char.get("c", "") for char in span.get("chars", []))
+                span["text"] = text
+                if not keep_span_characters(span):
+                    span.pop("chars", None)
                 if not text:
                     continue
                 if previous and pieces and not pieces[-1].endswith(" ") and not text.startswith(" "):
@@ -87,6 +100,9 @@ def _read_lines(page: fitz.Page, page_number: int) -> list[_Line]:
                 size = round(float(span.get("size", 10)), 1)
                 weights[size] += count
                 total_chars += count
+                baselines[round(float(span.get("origin", (0, item["bbox"][3]))[1]), 1)] += count
+                if re.search(r"(?:CMMI|CMMIB|CMSY|CMEX|MSAM|MSBM|Math|Symbol)", span.get("font", ""), re.I):
+                    math_chars += count
                 if span.get("flags", 0) & 16 or "bold" in span.get("font", "").lower():
                     bold_chars += count
                 previous = span
@@ -98,8 +114,66 @@ def _read_lines(page: fitz.Page, page_number: int) -> list[_Line]:
                 text, x0, y0, x1, y1, weights.most_common(1)[0][0] if weights else 10,
                 bold_chars > total_chars * 0.5, block_number, page_number,
                 float(page.rect.width), float(page.rect.height),
+                baseline=baselines.most_common(1)[0][0] if baselines else y1,
+                math_ratio=math_chars / max(1, total_chars),
+                spans=spans,
             ))
-    return lines
+    return _merge_line_fragments(lines)
+
+
+def _merge_line_fragments(lines: list[_Line]) -> list[_Line]:
+    """Recover physical lines split into separate PDF text runs.
+
+    TeX formulas, accents and inline math can be separate PDF lines despite
+    sharing a baseline. Joining only nearby fragments (or one original block)
+    preserves columns. Equation numbers belong to the same mathematical row.
+    This does not attempt to infer missing mathematical symbols or LaTeX.
+    """
+    rows: list[list[_Line]] = []
+    for line in sorted(lines, key=lambda item: (item.baseline, item.x0)):
+        candidates = []
+        for row in reversed(rows):
+            main = max(row, key=lambda item: len(item.text))
+            tolerance = max(main.size, line.size) * 0.34
+            if line.baseline - main.baseline > max(main.size, line.size) * 1.2:
+                break
+            if abs(line.baseline - main.baseline) > tolerance:
+                continue
+            x0, x1 = min(item.x0 for item in row), max(item.x1 for item in row)
+            horizontal_gap = max(x0 - line.x1, line.x0 - x1, 0)
+            same_block = any(item.block == line.block for item in row)
+            is_number = lambda item: bool(re.fullmatch(r"[（(]\s*\d+[a-z]?\s*[）)]", item.text, re.I))
+            has_math = lambda item: item.math_ratio > .18 or bool(re.search(r"[=∑∫∏≈≤≥]", item.text))
+            equation_number_pair = ((is_number(line) and any(has_math(item) for item in row))
+                                    or (has_math(line) and any(is_number(item) for item in row)))
+            overlap_y = min(max(item.y1 for item in row), line.y1) - max(min(item.y0 for item in row), line.y0)
+            if overlap_y <= 0 or not (horizontal_gap < min(main.size, line.size) * 1.5
+                                      or (same_block and equation_number_pair)):
+                continue
+            candidates.append((abs(line.baseline - main.baseline), horizontal_gap, row))
+        if candidates:
+            min(candidates, key=lambda item: item[:2])[2].append(line)
+        else:
+            rows.append([line])
+
+    merged = []
+    for row in rows:
+        row.sort(key=lambda item: (item.x0, item.y0))
+        main = max(row, key=lambda item: len(item.text))
+        count = sum(len(item.text) for item in row)
+        text = _join_lines([item.text for item in row])
+        math_ratio = sum(item.math_ratio * len(item.text) for item in row) / max(1, count)
+        # A separate right-aligned equation number must not become a heading or
+        # a translation paragraph of its own. Ordinary prose ending in a
+        # parenthetical citation is excluded by the math/short-row evidence.
+        numbered = any(re.fullmatch(r"[（(]\s*\d+[a-z]?\s*[）)]", item.text, re.I) for item in row)
+        equation = numbered and (math_ratio > .18 or (len(text) < 180 and bool(re.search(r"[=∑∫∏≈≤≥]", text))))
+        merged.append(_Line(text, min(item.x0 for item in row), min(item.y0 for item in row),
+                            max(item.x1 for item in row), max(item.y1 for item in row),
+                            main.size, main.bold, main.block, main.page, main.width, main.height,
+                            baseline=main.baseline, math_ratio=math_ratio, equation=equation,
+                            spans=[span for item in row for span in item.spans]))
+    return merged
 
 
 def _margin_signature(line: _Line) -> str | None:
@@ -147,7 +221,7 @@ def _column_split(lines: list[_Line], body_size: float) -> float | None:
         return None
     width = lines[0].width
     prose = [line for line in lines if len(line.text) >= 22 and line.size >= body_size * 0.8
-             and line.x1 - line.x0 < width * 0.60]
+             and width * .20 < line.x1 - line.x0 < width * 0.60 and not line.equation]
     best = None
     for fraction in (0.45, 0.475, 0.5, 0.525, 0.55):
         split = width * fraction
@@ -160,6 +234,16 @@ def _column_split(lines: list[_Line], body_size: float) -> float | None:
         overlap = min(max(line.y1 for line in left), max(line.y1 for line in right)) - max(
             min(line.y0 for line in left), min(line.y0 for line in right))
         if overlap < body_size * 2:
+            continue
+        top = max(min(line.y0 for line in left), min(line.y0 for line in right))
+        bottom = min(max(line.y1 for line in left), max(line.y1 for line in right))
+        spanning_prose = [line for line in lines if line.x0 < split - 4 and line.x1 > split + 4
+                          and top <= (line.y0 + line.y1) / 2 <= bottom
+                          and len(line.text) >= 40 and line.size >= body_size * .8 and not line.equation]
+        # Short sentence endings and centered equations are not a gutter. A
+        # genuine two-column text region has almost no prose crossing it;
+        # full-width titles above that region remain compatible with columns.
+        if len(spanning_prose) >= max(2, (len(left) + len(right)) * .25):
             continue
         score = min(len(left), len(right)) * 3 + len(left) + len(right)
         candidate = (score, -abs(fraction - 0.5), split)
@@ -195,6 +279,11 @@ def _reading_order(lines: list[_Line], body_size: float) -> list[_Line]:
 
 def _heading_level(line: _Line, body_size: float) -> int | None:
     text = line.text.strip()
+    if line.equation:
+        return None
+    # Bold table cells and chart tick values are not section titles.
+    if not any(char.isalpha() for char in text):
+        return None
     if len(text) > 200 or len(text.split()) > 22:
         return None
     # Captions and list entries should remain prose even when bold.
@@ -243,6 +332,7 @@ def _assemble_page(lines: list[_Line], body_size: float) -> list[dict]:
     paragraphs = []
     group: list[_Line] = []
     group_level: int | None = None
+    group_equation = False
     ordered = _reading_order(lines, body_size)
     flow_right: dict[str, float] = defaultdict(float)
     for line in ordered:
@@ -251,20 +341,38 @@ def _assemble_page(lines: list[_Line], body_size: float) -> list[dict]:
     def flush() -> None:
         nonlocal group
         if group:
-            paragraphs.append({"text": _join_lines([line.text for line in group]),
-                               "page": group[0].page, "kind": "heading" if group_level else "paragraph",
-                               "level": group_level or 0})
+            paragraph = {"text": _join_lines([line.text for line in group]),
+                               "page": group[0].page,
+                               "kind": "heading" if group_level else "equation" if group_equation else "paragraph",
+                               "level": group_level or 0,
+                               "bbox": [round(min(line.x0 for line in group), 3),
+                                        round(min(line.y0 for line in group), 3),
+                                        round(max(line.x1 for line in group), 3),
+                                        round(max(line.y1 for line in group), 3)],
+                               "page_width": group[0].width, "page_height": group[0].height}
+            paragraph = recover_paragraph(paragraph, group)
+            expand_equation_source(paragraph, group, ordered, body_size)
+            paragraphs.append(paragraph)
         group = []
 
     for line in ordered:
         level = _heading_level(line, body_size)
         if not group:
-            group, group_level = [line], level
+            group, group_level, group_equation = [line], level, line.equation
             continue
         previous = group[-1]
         gap = line.y0 - previous.y0
         flow_changed = previous.flow != line.flow
-        if group_level is not None or level is not None:
+        if group_equation or line.equation:
+            # Limits under an operator may be separate small text runs. Keep
+            # them with the formula and its number, without absorbing prose.
+            small_math = (line.math_ratio > .35 and line.size < body_size * .90
+                          and line.x0 >= group[0].x0 - body_size
+                          and line.x1 <= max(item.x1 for item in group) + body_size)
+            preceding_limit = (line.equation and all(item.math_ratio > .35 and item.size < body_size * .90 for item in group))
+            merge = (not flow_changed and -body_size < gap < body_size * 1.8
+                     and ((group_equation and (line.equation or small_math)) or preceding_limit))
+        elif group_level is not None or level is not None:
             # Two-line paper titles / section titles may share one block.
             merge = (group_level is not None and level == group_level and line.block == previous.block
                      and not flow_changed and 0 < gap < max(line.size, previous.size) * 1.7
@@ -282,9 +390,10 @@ def _assemble_page(lines: list[_Line], body_size: float) -> list[dict]:
                      and (same_block or (full_previous_line and abs(indentation) < body_size * 0.75)))
         if merge:
             group.append(line)
+            group_equation = group_equation or line.equation
         else:
             flush()
-            group, group_level = [line], level
+            group, group_level, group_equation = [line], level, line.equation
     flush()
     return paragraphs
 
@@ -375,6 +484,7 @@ def _build_outline(paragraphs: list[dict], toc: list[list]) -> list[dict]:
     return outline
 
 
+@synchronized_pdf
 def extract_pdf(data: bytes, filename: str) -> dict:
     """Read an uploaded PDF, returning serializable paragraph and outline data.
 
@@ -428,7 +538,7 @@ def extract_pdf(data: bytes, filename: str) -> dict:
             warnings.append("部分文字的 PDF 字体编码可能异常，请对照原 PDF 检查提取结果。")
         title = _title((document.metadata or {}).get("title"), pages, body_size, filename)
         outline = _build_outline(paragraphs, document.get_toc(simple=True))
-        return {"title": title, "page_count": page_count, "paragraphs": paragraphs,
+        return {"title": title, "page_count": page_count, "paragraphs": paragraphs, "parse_version": PARSE_VERSION,
                 "outline": outline, "warnings": warnings}
     except PDFExtractionError:
         raise

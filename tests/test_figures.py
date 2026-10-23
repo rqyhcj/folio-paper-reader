@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import time
 
 from fastapi.testclient import TestClient
 import pymupdf as fitz
@@ -53,7 +54,19 @@ def illustrated_pdf(kind="vector"):
 def import_pdf(client, kind="vector"):
     response = client.post("/api/papers", files={"file": ("synthetic-figures.pdf", illustrated_pdf(kind), "application/pdf")})
     assert response.status_code == 200, response.text
-    return response.json()
+    return wait_for_figures(client, response.json()["id"])
+
+
+def wait_for_figures(client, paper_id):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/papers/{paper_id}")
+        assert response.status_code == 200
+        paper = response.json()
+        if paper.get("figure_status") in {"completed", "error"}:
+            return paper
+        time.sleep(.01)
+    pytest.fail("Background figures did not finish")
 
 
 @pytest.mark.parametrize("kind", ["vector", "raster"])
@@ -64,7 +77,9 @@ def test_import_recovers_original_vector_and_raster_figures_and_serves_png(clien
     figure = next(figure for figure in paper["figures"] if f"{kind} chart" in figure["caption"])
     assert figure["page"] == 1
     assert figure["after_paragraph_id"] in paragraphs
-    assert "Figure 1" in paragraphs[figure["after_paragraph_id"]]["text"]
+    assert figure["before_paragraph_id"] in paragraphs
+    assert "Figure 1" in paragraphs[figure["before_paragraph_id"]]["text"]
+    assert figure["bbox"][1] < paragraphs[figure["before_paragraph_id"]]["bbox"][1]
     assert figure["url"] == f"/api/papers/{paper['id']}/figures/{figure['id']}.png"
     assert figure["width"] >= 100 and figure["height"] >= 80
     response = client.get(figure["url"])
@@ -83,7 +98,8 @@ def test_figure_metadata_contains_only_public_ids_dimensions_caption_and_local_u
     paper = import_pdf(client)
     assert paper["figures"]
     for figure in paper["figures"]:
-        assert set(figure) == {"id", "page", "after_paragraph_id", "url", "caption", "width", "height"}
+        assert {"id", "page", "after_paragraph_id", "url", "caption", "width", "height",
+                "bbox", "page_width", "page_height"} <= set(figure)
         assert figure["url"].startswith(f"/api/papers/{paper['id']}/figures/")
         assert "\\" not in figure["url"]
     serialized = json.dumps(paper, ensure_ascii=False)
@@ -140,7 +156,7 @@ def test_old_saved_paper_generates_and_persists_figures_on_first_open_only(clien
     monkeypatch.setattr(api, "extract_figures", extract_once)
     first = client.get("/api/papers/legacy-paper")
     assert first.status_code == 200
-    figures = first.json()["figures"]
+    figures = wait_for_figures(client, "legacy-paper")["figures"]
     assert figures and calls == [True]
     assert db.get_paper("legacy-paper")["figures"] == figures
     assert client.get(figures[0]["url"]).status_code == 200

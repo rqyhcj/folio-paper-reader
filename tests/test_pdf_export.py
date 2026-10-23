@@ -108,6 +108,23 @@ def test_pdf_treats_html_like_content_as_literal_text():
         assert not any(page.get_images() or page.get_links() for page in document)
 
 
+def test_figure_precedes_its_source_caption_when_a_before_anchor_exists(tmp_path):
+    image = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 450, 55), False)
+    image.clear_with(190)
+    path = tmp_path / "chart.png"
+    image.save(str(path))
+    paper = manuscript()
+    paper["paragraphs"][1]["text"] = "Figure 1. A source caption below the chart."
+    paper["figures"] = [{"id": "f1", "page": 1, "before_paragraph_id": "p2",
+                         "after_paragraph_id": "p3", "caption": "Original chart"}]
+    with fitz.open(stream=export_pdf(paper, {"f1": path}), filetype="pdf") as document:
+        images = [(page, info) for page in document for info in page.get_image_info()]
+        assert len(images) == 1
+        page, info = images[0]
+        caption = page.search_for("Figure 1.")
+        assert caption and info["bbox"][3] < caption[0].y0
+
+
 def test_missing_images_are_reported_and_stale_anchors_do_not_drop_figures(tmp_path: Path):
     paper = manuscript()
     paper["figures"] = [{"id": "missing", "page": 2, "after_paragraph_id": "stale-id", "caption": "Missing original chart"}]

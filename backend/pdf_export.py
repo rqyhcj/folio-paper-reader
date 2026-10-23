@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 
 import fitz
+from .pdf_runtime import synchronized_pdf
 
 
 PAGE_WIDTH, PAGE_HEIGHT = fitz.paper_size("a4")
@@ -137,7 +138,9 @@ class _Layout:
             writer.write_text(page, color=MUTED)
 
 
-def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None) -> bytes:
+@synchronized_pdf
+def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None,
+               equation_paths: dict[str, Path] | None = None) -> bytes:
     """Return a complete A4 PDF; every English paragraph precedes its Chinese.
 
     Only explicitly supplied local image paths are read. A paper's URLs and text
@@ -146,6 +149,7 @@ def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None) -> byte
     treated as successfully exported. The caller retains ownership of inputs.
     """
     figure_paths = figure_paths or {}
+    equation_paths = equation_paths or {}
     title = _clean(paper.get("title")) or "未命名论文"
     with fitz.open() as document:
         layout = _Layout(document)
@@ -155,10 +159,16 @@ def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None) -> byte
         layout.text("英文原文与中文译文逐段对照", size=9.5, leading=17,
                     color=MUTED, after=21)
         figures = list(paper.get("figures") or [])
+        before_paragraph: dict[str, list[dict]] = defaultdict(list)
         after_paragraph: dict[str, list[dict]] = defaultdict(list)
         for figure in figures:
-            after_paragraph[str(figure.get("after_paragraph_id") or "")].append(figure)
+            before = figure.get("before_paragraph_id")
+            if before:
+                before_paragraph[str(before)].append(figure)
+            else:
+                after_paragraph[str(figure.get("after_paragraph_id") or "")].append(figure)
         inserted: set[str] = set()
+        figure_labels = {pid for figure in figures for pid in figure.get("text_paragraph_ids", [])}
 
         def insert_figures(items):
             for figure in items:
@@ -178,6 +188,21 @@ def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None) -> byte
 
         insert_figures(after_paragraph.get("", []))
         for paragraph in paper.get("paragraphs") or []:
+            insert_figures(before_paragraph.get(str(paragraph.get("id") or ""), []))
+            if paragraph.get("id") in figure_labels and paragraph.get("kind") != "heading":
+                insert_figures(after_paragraph.get(str(paragraph.get("id") or ""), []))
+                continue
+            if paragraph.get("kind") == "equation":
+                if paragraph.get("math_status") == "source-image":
+                    path = equation_paths.get(paragraph.get("id"))
+                    if path is not None and Path(path).is_file():
+                        layout.figure({"page": paragraph.get("page"), "caption": "原文公式"}, Path(path))
+                    else:
+                        layout.text("[公式原图未能导出，请查看原始 PDF]", size=9, leading=15, color=MUTED, after=14)
+                else:
+                    layout.text(_clean(paragraph.get("text")), font=layout.english, after=19)
+                insert_figures(after_paragraph.get(str(paragraph.get("id") or ""), []))
+                continue
             heading = paragraph.get("kind") == "heading"
             source = _clean(paragraph.get("text"))
             translated = _clean(paragraph.get("translation")) or "[尚未翻译]"

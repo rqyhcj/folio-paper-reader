@@ -113,7 +113,10 @@ def test_import_pdf_persists_outline_and_original(client):
     assert len(paper["outline"]) == 2
     paragraph_ids = {paragraph["id"] for paragraph in paper["paragraphs"]}
     assert all(section["paragraph_id"] in paragraph_ids for section in paper["outline"])
-    assert client.get(f"/api/papers/{paper['id']}").json() == paper
+    loaded = client.get(f"/api/papers/{paper['id']}").json()
+    # The text is immediately readable while figures finish independently.
+    assert loaded["paragraphs"] == paper["paragraphs"]
+    assert loaded["outline"] == paper["outline"]
     assert client.get("/api/papers").json()[0]["id"] == paper["id"]
     original = client.get(f"/api/papers/{paper['id']}/original")
     assert original.status_code == 200
