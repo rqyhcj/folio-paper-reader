@@ -1,0 +1,28 @@
+/* Model selection and paper figures inherit the reader's appearance tokens. */
+.settings-dialog { width: 560px; }
+#api-provider { margin-bottom: 14px; }
+.settings-dialog .provider-badge { margin-bottom: 20px; background: var(--sidebar); border-color: var(--line); }
+.settings-dialog .provider-mark { flex: 0 0 34px; font-family: var(--sans); font-style: normal; font-size: 18px; background: var(--canvas); color: var(--teal); }
+.settings-dialog .provider-badge strong { color: var(--ink); }
+.settings-dialog .provider-badge div > span { color: var(--muted); line-height: 1.7; }
+.endpoint-help { margin: 8px 0 0; font-size: 11px; line-height: 1.8; color: var(--muted); }
+.source-link { display: inline-block; margin: 10px 0 0 2px; color: var(--teal); font-size: 10px; line-height: 1.8; }
+.source-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+.translation-privacy { display: flex; gap: 9px; padding: 12px; margin: -7px 0 18px; border: 1px solid var(--line); border-radius: 7px; background: var(--sidebar); color: var(--text); }
+.translation-privacy > svg { width: 15px; height: 15px; margin-top: 3px; color: var(--teal); }
+.translation-privacy p { margin: 0; font-size: 11px; line-height: 1.9; }
+.settings-dialog .field-help { margin-bottom: 23px; }
+.paper-figure { margin: 28px 0 35px; padding: 15px; border: 1px solid var(--line); border-radius: 10px; background: var(--canvas); break-inside: avoid; }
+.figure-image-link { display: block; position: relative; text-align: center; border-radius: 5px; overflow: hidden; }
+.figure-image-link img { display: block; max-width: 100%; height: auto; margin: 0 auto; object-fit: contain; background: #fff; }
+.figure-open-label { display: inline-block; font-family: var(--sans); font-size: 11px; color: var(--teal); padding: 8px 0 0; }
+.figure-image-link:hover .figure-open-label { text-decoration: underline; text-underline-offset: 3px; }
+.paper-figure figcaption { margin-top: 10px; color: var(--text); font-size: 13px; font-family: var(--serif), var(--sans); line-height: 1.8; overflow-wrap: anywhere; white-space: pre-wrap; }
+.figure-error { padding: 12px; margin: 0; font-family: var(--sans); font-size: 12px; line-height: 1.8; color: var(--muted); border: 1px dashed var(--line); border-radius: 5px; }
+@media (max-width: 600px) {
+  .paper-figure { margin: 23px 0 29px; padding: 9px; }
+  .paper-figure figcaption { font-size: 12px; }
+  .settings-dialog .form-row { gap: 10px; }
+  .settings-dialog .concurrency-field { flex-basis: 115px; }
+  .translation-privacy p { font-size: 10px; }
+}

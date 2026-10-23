@@ -1,0 +1,19 @@
+/* Display equations scroll within a paragraph instead of widening the reader. */
+.paragraph-original .katex,
+.paragraph-translation .katex { font-size: 1.04em; color: inherit; white-space: normal; }
+.paragraph-original .katex-display,
+.paragraph-translation .katex-display {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: .35em .12em;
+  margin: .85em 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--muted) transparent;
+  white-space: normal;
+}
+.paragraph-original .katex-display > .katex,
+.paragraph-translation .katex-display > .katex { white-space: nowrap; }
+.paragraph-original .katex-error,
+.paragraph-translation .katex-error { color: inherit !important; overflow-wrap: anywhere; }

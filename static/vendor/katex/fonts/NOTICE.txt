@@ -1,0 +1,45 @@
+KaTeX 0.19.0 font redistribution notice
+
+These unmodified TTF, WOFF, and WOFF2 files were obtained from the official
+KaTeX npm distribution:
+https://registry.npmjs.org/katex/-/katex-0.19.0.tgz
+Upstream project: https://github.com/KaTeX/KaTeX/tree/v0.19.0
+
+The JavaScript and CSS package's MIT license at ../LICENSE does not replace
+the separate font license. The bundled font files identify SIL Open Font
+License, Version 1.1 in their embedded metadata. See the complete OFL.txt in
+this directory. The OFL does not require documents produced using these
+fonts to be licensed under the OFL.
+
+Copyright metadata (name ID 0), preserved verbatim:
+Copyright (c) 2009-2010 Design Science, Inc.
+Copyright (c) 2014-2018 Khan Academy
+
+License metadata (name ID 13), for each font's respective Reserved Font Name:
+Copyright (c) 2009-2010, Design Science, Inc. (<www.mathjax.org>)
+Copyright (c) 2014-2018 Khan Academy (<www.khanacademy.org>),
+with Reserved Font Name [the corresponding name below].
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+This license available with a FAQ at:
+http://scripts.sil.org/OFL
+
+Reserved Font Names found in all 20 included TTF files:
+KaTeX_AMS
+KaTeX_Caligraphic
+KaTeX_Fraktur
+KaTeX_Main
+KaTeX_Math
+KaTeX_SansSerif
+KaTeX_Script
+KaTeX_Size1
+KaTeX_Size2
+KaTeX_Size3
+KaTeX_Size4
+KaTeX_Typewriter
+
+The OFL's license body was obtained from the license steward's official text:
+https://openfontlicense.org/documents/OFL.txt
+The copyright and Reserved Font Name header uses the actual bundled font
+metadata in place of that document's placeholders. Font binaries and their
+embedded copyright/license/name metadata have not been modified.

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f4ee">
+  <title>纸间 Folio · 论文阅读</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/appearance.css">
+  <link rel="stylesheet" href="/providers.css">
+  <link rel="stylesheet" href="/vendor/katex/katex.min.css">
+  <link rel="stylesheet" href="/math.css">
+  <link rel="stylesheet" href="/layout.css">
+  <script defer src="/vendor/katex/katex.min.js"></script>
+  <script defer id="katex-auto-render-script" src="/vendor/katex/contrib/auto-render.min.js"></script>
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <svg class="icon-defs" aria-hidden="true"><defs>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V3m-5 5 5-5 5 5M4 15v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M12 6c-4-3-8-2-9-1v15c3-2 6-2 9 0 3-2 6-2 9 0V5c-1-1-5-2-9 1Zm0 0v14"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H5a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V9Zm0 0v6h6M8 13h8m-8 4h6"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="m9.5 3-.6 2.4-2.1 1.2-2.4-.7L2 10l1.8 1.7v2.4L2 15.8l2.4 4.1 2.4-.7 2.1 1.2.6 2.4h5l.6-2.4 2.1-1.2 2.4.7 2.4-4.1-1.8-1.7v-2.4L22 10l-2.4-4.1-2.4.7-2.1-1.2L14.5 3Z" transform="translate(0 -1) scale(1 .96)"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h16m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-chevr" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 2.7 6.3L21 12l-6.3 2.7L12 21l-2.7-6.3L3 12l6.3-2.7ZM20 2v4m-2-2h4"/></symbol>
+    <symbol id="i-translate" viewBox="0 0 24 24"><path d="M3 5h12M9 2v3M6 5c0 6 3 9 7 11M13 5c-1 5-4 9-9 12m9 4 5-13 5 13m-8-5h6"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 3h7v7m0-7L10 14m0-10H4v16h16v-6"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+    <symbol id="i-retry" viewBox="0 0 24 24"><path d="M4 9a8 8 0 1 1 0 6M4 3v6h6"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-11v1"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Z"/><path d="m8 12 3 3 5-6"/></symbol>
+  </defs></svg>
+
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#" id="brand-home" aria-label="纸间首页"><span class="brand-mark"><span></span><span></span><span></span></span><strong>纸间<span>FOLIO</span></strong></a>
+      <button class="button primary import-button" id="sidebar-import"><svg><use href="#i-plus"/></svg>导入论文 <span class="keyboard-hint">PDF</span></button>
+      <div class="sidebar-tabs" role="tablist" aria-label="侧边栏"><button id="tab-library" role="tab" aria-selected="true" class="active"><svg><use href="#i-book"/></svg>文献库<span id="library-count">0</span></button><button id="tab-outline" role="tab" aria-selected="false"><svg><use href="#i-menu"/></svg>目录</button></div>
+      <div class="sidebar-scroll">
+        <div id="library-panel" role="tabpanel"><div class="sidebar-label">我的论文</div><div id="paper-list"></div><div id="library-empty" class="library-empty"><svg><use href="#i-file"/></svg><p>把值得读的论文<br>留在这里</p></div></div>
+        <div id="outline-panel" role="tabpanel" hidden><div class="sidebar-label">文章目录 <span id="outline-count"></span></div><div id="outline-list"></div><div id="outline-empty" class="sidebar-empty">导入一篇论文，<br>开始有条理地阅读。</div></div>
+      </div>
+      <div class="sidebar-bottom"><button class="api-status" id="open-settings"><span class="status-dot" id="api-dot"></span><span><strong id="api-status-label">连接翻译模型</strong><small id="api-status-detail">配置你的 API</small></span><svg><use href="#i-settings"/></svg></button><a class="source-link" href="https://github.com/rqyhcj/folio-paper-reader" target="_blank" rel="noopener">AGPL-3.0 · 项目源码 ↗</a><div class="sidebar-footnote">留一点时间，读深一点。<span>✧</span></div></div>
+    </aside>
+    <button class="sidebar-backdrop" id="sidebar-backdrop" aria-label="关闭侧边栏" hidden></button>
+    <div class="workspace">
+      <header class="topbar">
+        <div class="topbar-left"><button class="icon-button mobile-menu" id="toggle-sidebar" title="打开侧边栏" aria-label="打开侧边栏"><svg><use href="#i-menu"/></svg></button><div class="breadcrumb"><span>阅读空间</span><svg><use href="#i-chevr"/></svg><strong id="breadcrumb-title">开始探索</strong></div></div>
+        <div class="topbar-right"><span class="local-badge"><span></span>本地文献库</span><button class="icon-button" id="top-settings" title="API 设置" aria-label="API 设置"><svg><use href="#i-settings"/></svg></button><span class="avatar" title="你的阅读空间">读</span></div>
+      </header>
+      <main id="main-content">
+        <section id="welcome-view" class="welcome-view">
+          <div class="welcome-intro"><div class="eyebrow"><span></span> A QUIETER SPACE FOR BIG IDEAS</div><h1>跨过语言，<br>走近<span>每一个想法。</span></h1><p>从一篇论文开始。让原文与译文相伴，<br class="desktop-break">让阅读的节奏，回到你手中。</p></div>
+          <div class="import-card" id="drop-zone" tabindex="0" role="button" aria-label="点击或拖放 PDF 导入论文">
+            <div class="file-art"><div class="file-art-back"></div><div class="file-art-front"><svg><use href="#i-file"/></svg><span>PDF</span></div><span class="file-art-spark">✧</span></div>
+            <h2>你的下一篇，读懂更多。</h2><p>拖入 PDF 文件，或点击下方按钮选择论文</p><button class="button primary" id="welcome-import"><svg><use href="#i-upload"/></svg>选择 PDF 论文<svg class="button-arrow"><use href="#i-arrow"/></svg></button><small>本地保存 · 按段翻译 · 双语对照</small>
+          </div>
+          <div class="welcome-details"><span><svg><use href="#i-translate"/></svg>英文一段，中文一段</span><i></i><span><svg><use href="#i-menu"/></svg>目录导航，直达重点</span><i></i><span><svg><use href="#i-shield"/></svg>自由配置大模型 API</span></div>
+          <div class="demo-invitation"><div><span class="mini-label">先感受一下</span><p>让复杂的知识，变得触手可及。</p></div><button id="load-demo">打开示例文稿<svg><use href="#i-arrow"/></svg></button></div>
+          <footer class="welcome-footer"><span>纸间 FOLIO</span><span>一段原文，一段理解。</span><span>为专注而设计</span></footer>
+        </section>
+
+        <section id="reader-view" class="reader-view" hidden>
+          <div class="reader-toolbar"><div class="view-switch" role="group" aria-label="阅读模式"><button id="view-bilingual" class="active"><svg><use href="#i-translate"/></svg>双语阅读</button><button id="view-original">仅原文</button></div><div class="reader-tools"><div class="font-control"><button id="font-minus" title="缩小字号" aria-label="缩小字号">A−</button><span id="font-size-label">18</span><button id="font-plus" title="放大字号" aria-label="放大字号">A+</button></div><span class="tool-divider"></span><button class="icon-button" id="toggle-search" title="搜索文内内容" aria-label="搜索文内内容"><svg><use href="#i-search"/></svg></button><a class="icon-button" id="open-original" target="_blank" rel="noopener" title="查看原始 PDF" aria-label="查看原始 PDF"><svg><use href="#i-external"/></svg></a><div class="export-container"><button class="button subtle small" id="export-button"><svg><use href="#i-download"/></svg><span>导出</span><svg class="tiny"><use href="#i-down"/></svg></button><div id="export-menu" class="export-menu" hidden><button data-export="pdf">导出双语 PDF <span>.pdf</span></button><button data-export="markdown">导出 Markdown <span>.md</span></button><button data-export="html">导出双语网页 <span>.html</span></button></div></div><button class="button primary small translate-action" id="translate-button"><svg><use href="#i-spark"/></svg><span>全文翻译</span></button></div></div>
+          <div id="search-bar" class="search-bar" hidden><svg><use href="#i-search"/></svg><input id="document-search" type="search" placeholder="搜索原文或译文…" autocomplete="off"><span id="search-results"></span><button id="search-prev" class="icon-button" aria-label="上一处" title="上一处">↑</button><button id="search-next" class="icon-button" aria-label="下一处" title="下一处">↓</button><button id="search-close" class="icon-button" aria-label="关闭搜索"><svg><use href="#i-close"/></svg></button></div>
+          <div id="translation-banner" class="translation-banner" hidden><div class="translation-banner-main"><span class="translation-indicator"></span><strong id="translation-status">正在翻译</strong><span id="translation-detail"></span><button id="retry-failed" hidden>重试失败段落</button></div><div class="progress-track"><div id="translation-progress"></div></div></div>
+          <div class="reader-scroll" id="reader-scroll"><article id="paper-article" class="paper-article"><header class="paper-header"><div class="paper-kicker"><span id="paper-type">RESEARCH PAPER</span><span class="paper-type-line"></span><span id="paper-date"></span></div><h1 id="paper-title"></h1><div class="paper-metadata"><span><svg><use href="#i-file"/></svg><span id="paper-pages"></span></span><span id="paper-paragraphs"></span><span class="translated-badge" id="paper-translated"></span></div><div id="paper-notice" class="paper-notice" hidden></div></header><div id="paragraphs" class="paragraphs"></div><footer class="paper-end"><span>✧</span><p>每一次读懂，都是一次抵达。</p><button id="back-to-top">返回文首 ↑</button></footer></article></div>
+          <div class="reader-statusbar"><span id="reading-location">开始阅读</span><span id="read-progress">0%</span><span class="statusbar-end">纸间 · 让理解发生</span></div>
+        </section>
+        <div id="loading-view" class="loading-view" hidden><span class="loader"></span><h2 id="loading-title">正在整理你的论文</h2><p id="loading-detail">提取文字与章节，留住清晰的阅读脉络…</p></div>
+      </main>
+    </div>
+  </div>
+
+  <input type="file" id="pdf-input" accept=".pdf,application/pdf" hidden>
+  <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title" aria-describedby="settings-description">
+    <form id="settings-form">
+      <div class="dialog-header"><div><span class="mini-label">YOUR MODEL, YOUR CHOICE</span><h2 id="settings-title">连接你的翻译模型</h2></div><button type="button" class="icon-button" id="settings-close" aria-label="关闭设置"><svg><use href="#i-close"/></svg></button></div>
+      <p class="dialog-description" id="settings-description">首次使用请自行选择服务商、填写模型与密钥。也可以关闭此窗口，先打开示例文稿体验阅读。</p>
+      <label for="api-provider">模型服务商</label>
+      <select id="api-provider"><option value="custom">自定义 OpenAI 兼容接口</option></select>
+      <div class="provider-badge"><span class="provider-mark" id="provider-mark">↗</span><div><strong id="provider-name">自定义 OpenAI 兼容接口</strong><span id="provider-note">填写你选择的模型服务信息</span></div></div>
+      <label for="api-endpoint">API 地址</label>
+      <input id="api-endpoint" type="url" required placeholder="完整的 Chat Completions 请求地址" spellcheck="false" autocomplete="off">
+      <p class="endpoint-help">填写完整请求地址，例如以 /chat/completions 结尾；可按服务商说明修改。</p>
+      <div class="form-row"><div><label for="api-model">模型名称</label><input id="api-model" list="api-model-options" required placeholder="自行选择或输入模型" spellcheck="false" autocomplete="off"><datalist id="api-model-options"></datalist></div><div class="concurrency-field"><label for="api-concurrency">并行段落</label><select id="api-concurrency"><option value="1">1 段 · 稳定</option><option value="2">2 段 · 推荐</option><option value="3">3 段</option><option value="4">4 段</option></select></div></div>
+      <div class="label-row"><label for="api-key" id="api-key-label">API Key</label><button type="button" id="clear-key">清除已保存的密钥</button></div>
+      <div class="password-input"><input id="api-key" type="password" placeholder="输入所选服务的 API Key" autocomplete="off" spellcheck="false"><button type="button" id="toggle-key" aria-label="显示密钥">显示</button></div>
+      <p class="field-help"><svg><use href="#i-shield"/></svg><span id="api-key-help">填写该服务商提供的密钥。密钥仅保存在本机配置中，不会写入导出文稿。</span></p>
+      <div class="translation-privacy"><svg><use href="#i-info"/></svg><p>点击翻译后，论文正文将发送到你配置的模型服务。请确认你有权处理该文献，并了解该服务的数据处理政策及费用。使用本机 Ollama 时，内容发往你填写的本机地址。</p></div>
+      <div id="settings-message" class="form-message" role="status" aria-live="polite" hidden></div>
+      <div class="dialog-footer"><button type="button" class="button secondary" id="test-connection"><span class="status-dot"></span>测试连接</button><button type="submit" class="button primary" id="save-settings">保存设置<svg><use href="#i-check"/></svg></button></div>
+    </form>
+  </dialog>
+  <dialog id="confirm-dialog" class="confirm-dialog"><form method="dialog"><div class="delete-art"><svg><use href="#i-trash"/></svg></div><h2>从文献库中移除？</h2><p id="confirm-description"></p><div class="confirm-buttons"><button class="button secondary" value="cancel">取消</button><button class="button danger" value="confirm">移除论文</button></div></form></dialog>
+  <div class="toast-container" id="toasts" aria-live="polite"></div>
+</body>
+</html>

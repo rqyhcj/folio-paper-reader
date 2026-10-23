@@ -1,0 +1,80 @@
+/* Layout is independent of colour and typography preferences. */
+.layout-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.layout-control{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-width:30px;height:30px;padding:5px 7px;border:1px solid transparent;border-radius:6px;color:var(--muted);background:transparent;white-space:nowrap;flex-shrink:0;transition:background .15s,color .15s}
+.layout-control svg{width:17px;height:17px}
+.layout-control:hover{background:var(--folio-panel-soft,var(--teal-light));color:var(--ink)}
+.layout-control[aria-pressed="true"]{background:var(--folio-panel-soft,var(--teal-light));border-color:var(--line);color:var(--folio-accent-ink,var(--teal))}
+.layout-control-label{font-size:11px}
+.layout-reader-navigation{display:flex;align-items:center;gap:8px;min-width:0}
+body[data-folio-layout] .reader-tools{flex-wrap:wrap;justify-content:flex-end}
+body[data-folio-layout] .reader-toolbar{gap:9px;flex-wrap:wrap}
+body[data-folio-layout] .topbar-right{gap:12px}
+.layout-reader-sidebar{display:none}
+body.folio-sidebar-collapsed .layout-reader-sidebar,body.folio-focus-mode .layout-reader-sidebar{display:inline-flex}
+.layout-sidebar-collapse,.layout-sidebar-resizer{display:none}
+body[data-folio-layout] .paper-article{padding-left:clamp(25px,3.6vw,64px);padding-right:clamp(25px,3.6vw,64px)}
+/* Fluid mode removes the old fixed article cap, so each freed sidebar pixel is usable. */
+html body[data-folio-layout].folio-reading-fluid .paper-article{width:100%;max-width:none;margin-left:0;margin-right:0}
+body.folio-toolbar-compact .topbar{height:47px;padding-left:22px;padding-right:22px}
+body.folio-toolbar-compact .reader-toolbar{padding:6px 22px;min-height:45px}
+body.folio-toolbar-compact .reader-toolbar .view-switch{padding:2px}
+body.folio-toolbar-compact .reader-toolbar .view-switch button{padding-top:4px;padding-bottom:4px}
+body.folio-toolbar-compact .reader-toolbar .small{padding-top:5px;padding-bottom:5px}
+body.folio-toolbar-compact .reader-statusbar{padding-top:6px;padding-bottom:6px;min-height:27px}
+body.folio-toolbar-compact .paper-article{padding-top:32px}
+body.folio-focus-mode .topbar,body.folio-focus-mode #translation-banner{display:none!important}
+body.folio-focus-mode .reader-toolbar{padding:4px 18px;min-height:40px}
+body.folio-focus-mode .reader-toolbar .view-switch{padding:1px}
+body.folio-focus-mode .reader-toolbar .view-switch button{padding-top:3px;padding-bottom:3px}
+body.folio-focus-mode .reader-toolbar .small{padding-top:4px;padding-bottom:4px}
+body.folio-focus-mode .reader-toolbar .font-control,body.folio-focus-mode .reader-toolbar .tool-divider{display:none}
+body.folio-focus-mode .paper-article{padding-top:24px}
+body.folio-focus-mode .reader-statusbar{min-height:24px;padding-top:4px;padding-bottom:4px}
+body[data-folio-layout] #translate-button{display:inline-flex!important;visibility:visible;flex-shrink:0}
+body.folio-sidebar-resizing,body.folio-sidebar-resizing *{cursor:col-resize!important;user-select:none!important}
+@media(min-width:741px){
+  body[data-folio-layout] .app-shell{position:relative}
+  body[data-folio-layout] .sidebar{position:relative;width:var(--folio-layout-sidebar-width,240px);min-width:0;transition:none}
+  body[data-folio-layout] #toggle-sidebar{display:inline-flex}
+  body[data-folio-layout] .sidebar .brand{padding:27px 17px 27px;gap:10px;max-width:100%}
+  body[data-folio-layout] .sidebar .brand strong{font-size:23px}
+  body[data-folio-layout] .sidebar .brand strong>span{font-size:10px}
+  body[data-folio-layout] .sidebar .import-button{margin-left:15px;margin-right:15px;margin-bottom:23px;padding-left:11px;padding-right:11px}
+  body[data-folio-layout] .sidebar-tabs{margin-left:15px;margin-right:15px;gap:12px}
+  body[data-folio-layout] .sidebar-tabs button{gap:5px}
+  body[data-folio-layout] .sidebar-bottom{padding-left:15px;padding-right:15px}
+  body[data-folio-layout] .layout-sidebar-collapse{display:inline-flex;position:absolute;right:9px;top:28px;min-width:24px;width:24px;height:27px;padding:4px;color:var(--folio-sidebar-muted,var(--muted))}
+  body[data-folio-layout] .layout-sidebar-collapse:hover{background:var(--folio-sidebar-hover,var(--teal-light))}
+  body[data-folio-layout] .layout-sidebar-resizer{display:block;flex:0 0 7px;width:7px;margin-left:-4px;margin-right:-3px;position:relative;z-index:25;cursor:col-resize;touch-action:none;outline-offset:-2px}
+  .layout-sidebar-resizer:before{content:'';position:absolute;top:0;bottom:0;left:3px;width:1px;background:transparent;transition:background .15s}
+  .layout-sidebar-resizer:hover:before,.layout-sidebar-resizer:focus-visible:before,body.folio-sidebar-resizing .layout-sidebar-resizer:before{width:2px;background:var(--teal)}
+  body[data-folio-layout].folio-sidebar-collapsed .sidebar{width:0;visibility:hidden;overflow:hidden;border-right:0}
+  body.folio-sidebar-collapsed .layout-sidebar-resizer{display:none}
+  body.folio-sidebar-narrow .sidebar .brand{padding-left:14px}
+  body.folio-sidebar-narrow .sidebar .brand strong{font-size:21px}
+  body.folio-sidebar-narrow .sidebar .brand-mark{transform:scale(.9);transform-origin:left center;width:27px}
+  body.folio-sidebar-narrow .sidebar .import-button .keyboard-hint,body.folio-sidebar-narrow .sidebar-tabs button>span{display:none}
+  body.folio-sidebar-narrow .sidebar-tabs{gap:13px}
+  body.folio-sidebar-narrow .sidebar-tabs button{font-size:11px}
+  body.folio-sidebar-narrow .sidebar-tabs button svg{width:14px;height:14px}
+  body.folio-sidebar-narrow .sidebar-scroll{padding-left:5px;padding-right:5px}
+  body.folio-sidebar-narrow .outline-item{padding-left:9px;padding-right:9px}
+  body.folio-sidebar-narrow .outline-item[data-level="2"]{padding-left:18px}
+  body.folio-sidebar-narrow .outline-item[data-level="3"]{padding-left:26px}
+  body.folio-sidebar-narrow .sidebar-footnote{font-size:8px;letter-spacing:0}
+}
+@media(max-width:1150px){.layout-control-label{display:none}body[data-folio-layout] .reader-tools{gap:3px}body[data-folio-layout] .topbar-right{gap:9px}body[data-folio-layout] .topbar .local-badge{display:none}}
+@media(max-width:740px){
+  body[data-folio-layout] .layout-sidebar-collapse,body[data-folio-layout] .layout-sidebar-resizer{display:none}
+  body[data-folio-layout] .topbar-right{gap:7px}
+  body[data-folio-layout] .topbar .avatar{display:none}
+  body.folio-toolbar-compact .topbar{height:45px;padding-left:13px;padding-right:13px}
+  body.folio-toolbar-compact .reader-toolbar,body.folio-focus-mode .reader-toolbar{padding:5px 11px;gap:7px}
+  body[data-folio-layout] .reader-tools{gap:1px}
+  body[data-folio-layout] .reader-toolbar .layout-control{min-width:27px;width:27px;height:28px;padding:4px}
+  .layout-reader-navigation{gap:5px}
+  body[data-folio-layout] .paper-article{padding-left:24px;padding-right:24px}
+  body[data-folio-layout] .reader-toolbar .view-switch button{padding-left:6px;padding-right:6px}
+  body.folio-focus-mode .layout-reader-sidebar{display:inline-flex}
+}
+@media(prefers-reduced-motion:reduce){.layout-control,.layout-sidebar-resizer:before{transition:none}}
