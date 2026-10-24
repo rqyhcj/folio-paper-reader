@@ -22,7 +22,7 @@ from .math_recovery import _span_text, expand_equation_source, keep_span_charact
 MAX_PAGES = 500
 MAX_TEXT_CHARS = 3_000_000
 MAX_PARAGRAPH_CHARS = 4500
-PARSE_VERSION = 4
+PARSE_VERSION = 5
 
 
 class PDFExtractionError(ValueError):
@@ -47,6 +47,7 @@ class _Line:
     math_ratio: float = 0.0
     equation: bool = False
     spans: list[dict] = field(default_factory=list)
+    inline_region: int | None = None
 
 
 _LIGATURES = str.maketrans({
@@ -147,11 +148,12 @@ def _merge_line_fragments(lines: list[_Line]) -> list[_Line]:
             def extension(item: _Line) -> bool:
                 return bool(item.spans and len(item.text) <= 4 and all(
                     "CMEX" in span.get("font", "").upper() for span in item.spans))
-            extension_overlap = ((extension(line) or any(extension(item) for item in row))
-                                 and max(min(item.x0 for item in row) - line.x1,
-                                         line.x0 - max(item.x1 for item in row), 0) <= min(main.size, line.size) * .65
-                                 and min(max(item.y1 for item in row), line.y1) > max(min(item.y0 for item in row), line.y0))
-            if abs(line.baseline - main.baseline) > tolerance and not extension_overlap:
+            # Tall extension glyphs have an artificial top baseline. Joining
+            # them here lets one radical bridge two different prose rows.
+            # Attach these glyphs only after the real baseline rows exist.
+            if extension(line) or any(extension(item) for item in row):
+                continue
+            if abs(line.baseline - main.baseline) > tolerance:
                 continue
             x0, x1 = min(item.x0 for item in row), max(item.x1 for item in row)
             horizontal_gap = max(x0 - line.x1, line.x0 - x1, 0)
@@ -217,8 +219,8 @@ def _attach_extension_fragments(lines: list[_Line]) -> list[_Line]:
                    and min(line.y1, glyph.y1) > max(line.y0, glyph.y0)]
         if not targets:
             continue
-        target = min(targets, key=lambda item: (max(item.x0 - glyph.x1, glyph.x0 - item.x1, 0),
-                                                abs(item.baseline - glyph.baseline)))
+        target = min(targets, key=lambda item: (abs(item.baseline - glyph.y1),
+                                                max(item.x0 - glyph.x1, glyph.x0 - item.x1, 0)))
         target.x0, target.y0 = min(target.x0, glyph.x0), min(target.y0, glyph.y0)
         target.x1, target.y1 = max(target.x1, glyph.x1), max(target.y1, glyph.y1)
         target.spans.extend(glyph.spans)
@@ -230,9 +232,98 @@ def _attach_extension_fragments(lines: list[_Line]) -> list[_Line]:
     return pending
 
 
+def _attach_inline_math_fragments(lines: list[_Line], body_size: float) -> list[_Line]:
+    """Place small inline fractions on their real prose row, never a display.
+
+    A numerator / denominator may have smaller type and unrelated PDF blocks.
+    Its nearest body-text baseline is the surrounding line, including prose to
+    the right of the fraction. Keeping that physical row intact also lets the
+    translation placeholder cover the whole formula instead of a lone letter.
+    """
+    pending = list(lines)
+    split = _column_split(lines, body_size)
+
+    def column(line: _Line) -> int:
+        return 0 if split is None else -1 if line.x1 <= split else 1 if line.x0 >= split else 0
+
+    prose = [line for line in lines if not line.equation and line.size >= body_size * .85
+             and not _math_only(line) and _heading_level(line, body_size) is None]
+    for fragment in lines:
+        if not any(item is fragment for item in pending) or fragment.equation or not _math_only(fragment):
+            continue
+        if fragment.x1 - fragment.x0 > fragment.width * .45:
+            continue
+        targets = [line for line in prose if column(line) == column(fragment)
+                   and ((fragment.size < body_size * .85
+                         and abs(line.baseline - fragment.baseline) <= body_size * .90
+                         and max(line.x0 - fragment.x1, fragment.x0 - line.x1, 0) <= body_size * 2.6)
+                        or (abs(line.baseline - fragment.baseline) <= body_size * .34
+                            and max(line.x0 - fragment.x1, fragment.x0 - line.x1, 0) <= body_size * 1.8))
+                   and min(line.y1, fragment.y1) > max(line.y0, fragment.y0)]
+        if not targets:
+            continue
+        target = min(targets, key=lambda line: (abs(line.baseline - fragment.baseline),
+                                                max(line.x0 - fragment.x1, fragment.x0 - line.x1, 0)))
+        target.x0, target.y0 = min(target.x0, fragment.x0), min(target.y0, fragment.y0)
+        target.x1, target.y1 = max(target.x1, fragment.x1), max(target.y1, fragment.y1)
+        target.spans.extend(fragment.spans)
+        target.spans.sort(key=lambda span: span["bbox"][0])
+        target.text = _clean(_span_text(target.spans))
+        pending = [line for line in pending if line is not fragment]
+    return pending
+
+
+def _mark_inline_regions(lines: list[_Line], body_size: float) -> list[_Line]:
+    """Keep one continuous prose paragraph with its inline mathematical rows.
+
+    Formula ink can overlap the previous / next physical line. Baseline-only
+    paragraph rules would then split tiny math fragments into translations of
+    their own. Grow only through the small normal inter-line gap, stop at real
+    whitespace, headings, displays, or the other column.
+    """
+    split = _column_split(lines, body_size)
+
+    def column(line: _Line) -> int:
+        return 0 if split is None else -1 if line.x1 <= split else 1 if line.x0 >= split else 0
+
+    candidates = [line for line in lines if not line.equation and _heading_level(line, body_size) is None]
+    assigned = set()
+    for seed in candidates:
+        if id(seed) in assigned or not any("CMEX" in span.get("font", "").upper() for span in seed.spans):
+            continue
+        members = [seed]
+        member_ids = {id(seed)}
+        changed = True
+        while changed:
+            changed = False
+            for line in candidates:
+                if id(line) in assigned or id(line) in member_ids or column(line) != column(seed):
+                    continue
+                if any(max(line.y0 - item.y1, item.y0 - line.y1, 0) <= body_size * .45
+                       for item in members):
+                    top = min(line.y0, min(item.y0 for item in members))
+                    bottom = max(line.y1, max(item.y1 for item in members))
+                    if any(item.equation and column(item) == column(seed)
+                           and top < (item.y0 + item.y1) / 2 < bottom for item in lines):
+                        continue
+                    members.append(line)
+                    member_ids.add(id(line))
+                    changed = True
+        # Chart symbols and standalone displays are handled elsewhere.
+        prose_words = [word for line in members for span in line.spans
+                       if not re.search(r"CM|Math|Symbol|MSAM|MSBM", span.get("font", ""), re.I)
+                       for word in re.findall(r"[A-Za-z]{2,}", span.get("text", ""))]
+        if len(prose_words) < 5:
+            continue
+        for line in members:
+            line.inline_region = id(seed)
+        assigned.update(member_ids)
+    return lines
+
+
 _EQUATION_NUMBER = re.compile(r"[（(]\s*(\d+[a-z]?)\s*[）)]\s*[,.;:]?$", re.I)
 _MATH_WORDS = {"arg", "min", "max", "argmin", "argmax", "sin", "cos", "tan", "log", "ln",
-               "exp", "lim", "sup", "inf", "det", "diag", "rank", "tr", "SVD", "ReLU"}
+               "exp", "lim", "sup", "inf", "det", "diag", "rank", "tr", "Tr", "Var", "Cov", "Pr", "SVD", "ReLU"}
 _RELATION = re.compile(r"[=∑∫∏≈≃≅≠≤≥∈∉∼∝←→↔⇒⇔]")
 
 
@@ -301,6 +392,11 @@ def _merge_equation_regions(lines: list[_Line], body_size: float) -> list[_Line]
             for line in candidates:
                 if id(line) in assigned or id(line) in member_ids or column(line) != column(seed):
                     continue
+                if any(not _math_only(item) and column(item) == column(seed)
+                       and abs(item.baseline - line.baseline) <= body_size * .45
+                       and max(item.x0 - line.x1, line.x0 - item.x1, 0) <= body_size * 2
+                       for item in lines):
+                    continue  # a run beside prose belongs to that inline row
                 other_number = _EQUATION_NUMBER.search(line.text)
                 if other_number and other_number.group(1) != number:
                     continue  # two nearby numbered displays remain distinct
@@ -512,7 +608,9 @@ def _assemble_page(lines: list[_Line], body_size: float) -> list[dict]:
     group: list[_Line] = []
     group_level: int | None = None
     group_equation = False
-    ordered = _reading_order(_merge_equation_regions(lines, body_size), body_size)
+    lines = _merge_equation_regions(lines, body_size)
+    lines = _mark_inline_regions(_attach_inline_math_fragments(lines, body_size), body_size)
+    ordered = _reading_order(lines, body_size)
     flow_right: dict[str, float] = defaultdict(float)
     for line in ordered:
         flow_right[line.flow] = max(flow_right[line.flow], line.x1)
@@ -520,6 +618,9 @@ def _assemble_page(lines: list[_Line], body_size: float) -> list[dict]:
     def flush() -> None:
         nonlocal group
         if group:
+            if group[0].inline_region is not None and all(
+                    line.inline_region == group[0].inline_region for line in group):
+                group.sort(key=lambda line: (round(line.baseline * 2) / 2, line.x0))
             paragraph = {"text": _join_lines([line.text for line in group]),
                                "page": group[0].page,
                                "kind": "heading" if group_level else "equation" if group_equation else "paragraph",
@@ -542,7 +643,10 @@ def _assemble_page(lines: list[_Line], body_size: float) -> list[dict]:
         previous = group[-1]
         gap = line.y0 - previous.y0
         flow_changed = previous.flow != line.flow
-        if group_equation or line.equation:
+        if (not flow_changed and previous.inline_region is not None
+                and previous.inline_region == line.inline_region):
+            merge = True
+        elif group_equation or line.equation:
             # Limits under an operator may be separate small text runs. Keep
             # them with the formula and its number, without absorbing prose.
             small_math = (line.math_ratio > .35 and line.size < body_size * .90

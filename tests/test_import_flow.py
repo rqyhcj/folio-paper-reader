@@ -236,6 +236,50 @@ def test_control_glyphs_and_punctuation_are_never_sent_as_translation_requests(c
     assert client.post(f"/api/papers/{paper['id']}/paragraphs/{control['id']}/translate").status_code == 400
 
 
+@pytest.mark.parametrize("reply,accepted", [
+    ("均值为 ⟦FOLIO_MATH_1⟧，方差为 ⟦FOLIO_MATH_2⟧。", True),
+    ("均值为 x，方差为 y。", False),
+    ("您没有提供原文，请提供完整英文原文以便翻译。", False),
+])
+def test_translation_worker_sends_protected_prose_and_only_saves_a_complete_formula_reply(client, monkeypatch, reply, accepted):
+    monkeypatch.setattr(api, "extract_figures", lambda *args, **kwargs: [])
+    paper = upload(client)
+    paper = wait_for(client, paper["id"], lambda p: p["figure_status"] == "completed")
+    for paragraph in paper["paragraphs"][:-1]:
+        paragraph["kind"] = "equation"
+    body = paper["paragraphs"][-1]
+    body.update(text="Raw font q and broken \x00 math", translation=None,
+                translation_text="The mean is ⟦FOLIO_MATH_1⟧ and the variance is ⟦FOLIO_MATH_2⟧.",
+                translation_review_reason="protected-math-source", previous_translation_parts=[{"translation": "旧片段"}])
+    history = [{"parse_version": 4, "paragraphs": [{"id": "legacy", "translation": "完整保存的旧译文"}]}]
+    paper["translation_history"] = history
+    db.save_paper(db.refresh_progress(paper))
+    sent = []
+
+    async def translate(text, config):
+        sent.append(text)
+        return reply
+
+    monkeypatch.setattr(api, "translate_text", translate)
+    monkeypatch.setattr(api, "merged_settings", lambda _: {
+        "provider": "ollama", "endpoint": "http://localhost:11434/v1/chat/completions",
+        "concurrency": 1, "api_key": ""})
+    assert client.post(f"/api/papers/{paper['id']}/translate").status_code == 200
+    result = wait_for(client, paper["id"], lambda p: p["status"] in {"completed", "error"})
+    assert sent == [body["translation_text"]]
+    assert result["translation_history"] == history
+    translated = result["paragraphs"][-1]
+    if accepted:
+        assert translated["translation"] == reply
+        assert "translation_review_reason" not in translated
+        assert "previous_translation_parts" not in translated
+        assert result["progress"] == {"total": 1, "done": 1, "failed": 0}
+    else:
+        assert translated["translation"] is None and translated["error"]
+        assert translated["translation_review_reason"] == "protected-math-source"
+        assert result["progress"] == {"total": 1, "done": 0, "failed": 1}
+
+
 def test_artwork_on_a_page_without_text_stays_between_neighboring_pages(tmp_path):
     with fitz.open() as document:
         document.new_page()

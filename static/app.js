@@ -1,6 +1,6 @@
 import { initAppearance } from './appearance.js';
 import { initLayout } from './layout.js';
-import { renderMath, splitMathText } from './math.js';
+import { normalizeMathText, renderMath, splitMathText } from './math.js?v=inline-formulas-5';
 
 const $ = (id) => document.getElementById(id);
 const icon = (name) => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -288,6 +288,7 @@ function translatedText(paragraph) {
 }
 
 function paragraphText(element, text) {
+  text = normalizeMathText(text);
   const signature = JSON.stringify([text, state.search]);
   if (element.dataset.textSignature === signature) return;
   element.dataset.textSignature = signature;
@@ -313,6 +314,57 @@ function paragraphText(element, text) {
     element.append(document.createTextNode(part.text.slice(start)));
   }
   renderMath(element);
+}
+
+function translatedParagraphText(element, text, paragraph) {
+  const formulas = Array.isArray(paragraph.inline_math) ? paragraph.inline_math : [];
+  if (!formulas.length) { delete element.dataset.inlineSignature; paragraphText(element, text); return; }
+  const signature = JSON.stringify([state.paper.id, state.paper.parse_version, text, state.search, formulas]);
+  if (element.dataset.inlineSignature === signature) return;
+  element.dataset.inlineSignature = signature;
+  delete element.dataset.textSignature;
+  delete element.dataset.mathSearchHit;
+  element.replaceChildren();
+  const byToken = new Map(formulas.map((formula) => [formula.placeholder, formula]));
+  let offset = 0;
+  const appendText = (value) => {
+    if (!value) return;
+    const span = node('span');
+    paragraphText(span, value);
+    if (span.dataset.mathSearchHit) element.dataset.mathSearchHit = 'true';
+    element.append(span);
+  };
+  for (const match of text.matchAll(/⟦FOLIO_MATH_\d+⟧/g)) {
+    appendText(text.slice(offset, match.index));
+    const formula = byToken.get(match[0]);
+    if (!formula) appendText(match[0]);
+    else if (typeof formula.latex === 'string' && formula.latex) {
+      appendText(`\\(${formula.latex}\\)`);
+    } else {
+      const group = node('span', 'inline-source-math');
+      group.setAttribute('aria-label', '原文数学公式');
+      for (const [index, piece] of (formula.source || []).entries()) {
+        const box = piece.bbox || [];
+        const revision = [state.paper.parse_version || 1, piece.page, ...box].join(',');
+        const url = `/api/papers/${encodeURIComponent(state.paper.id)}/inline-math/${encodeURIComponent(paragraph.id)}/${encodeURIComponent(formula.id)}/${index}.png?v=${encodeURIComponent(revision)}`;
+        const link = node('a', 'inline-source-link');
+        link.href = url; link.target = '_blank'; link.rel = 'noopener'; link.title = '查看原文公式';
+        const image = document.createElement('img');
+        image.alt = '原式'; image.loading = 'lazy'; image.decoding = 'async';
+        if (box.length === 4 && box.every(Number.isFinite)) {
+          image.width = Math.max(1, Math.round(box[2] - box[0]));
+          image.height = Math.max(1, Math.round(box[3] - box[1]));
+          image.style.width = `${Math.max(1, box[2] - box[0]) / 11}em`;
+        }
+        image.addEventListener('error', () => { image.hidden = true; link.textContent = '查看原式 ↗'; });
+        image.src = url;
+        link.append(image); group.append(link);
+      }
+      element.append(group);
+    }
+    offset = match.index + match[0].length;
+  }
+  appendText(text.slice(offset));
 }
 
 function renderParagraphs(force = false) {
@@ -345,7 +397,8 @@ function renderParagraphs(force = false) {
     const translation = translatedText(paragraph);
     const retainedParts = !translation && Array.isArray(paragraph.previous_translation_parts)
       ? paragraph.previous_translation_parts.filter((part) => typeof part.translation === 'string' && part.translation.trim()) : [];
-    const signature = JSON.stringify([text, translation, paragraph.error, state.search, paragraph.math_status, paragraph.equation_image, retainedParts]);
+    const review = paragraph.translation_review_reason;
+    const signature = JSON.stringify([text, translation, paragraph.error, state.search, paragraph.math_status, paragraph.equation_image, paragraph.equation_source, paragraph.inline_math, review, retainedParts]);
     if (!force && block.dataset.signature === signature) continue;
     block.dataset.signature = signature;
     const original = block.querySelector('.paragraph-original');
@@ -365,30 +418,33 @@ function renderParagraphs(force = false) {
     }
     const target = block.querySelector('.paragraph-translation');
     target.className = 'paragraph-translation';
-    target.hidden = !translation && !paragraph.error && !retainedParts.length;
-    block.classList.toggle('has-translation', !!translation || retainedParts.length > 0);
+    target.hidden = !translation && !paragraph.error && !retainedParts.length && !review;
+    block.classList.toggle('has-translation', !!translation || retainedParts.length > 0 || !!review);
     block.classList.toggle('has-translation-error', !!paragraph.error && !translation);
-    if (translation) paragraphText(target, translation);
-    else if (retainedParts.length) {
+    if (translation) translatedParagraphText(target, translation, paragraph);
+    else if (retainedParts.length || review) {
       delete target.dataset.textSignature;
       delete target.dataset.mathSearchHit;
       target.classList.add('partial');
-      target.replaceChildren(node('small', 'retained-translation-note', '已保存的部分译文，继续翻译可补全'));
+      delete target.dataset.inlineSignature;
+      target.replaceChildren(node('small', 'retained-translation-note', '原文已重新整理，请重新翻译完整段落。旧译文已保留。'));
+      const details = node('details', 'retained-translation-details');
+      details.append(node('summary', '', `查看旧译文片段（${retainedParts.length}）`));
       for (const part of retainedParts) {
         const fragment = node('div', 'retained-translation-part');
         paragraphText(fragment, part.translation);
-        target.append(fragment);
+        details.append(fragment);
       }
-      if (paragraph.error) {
-        const retry = node('button', 'retained-translation-retry', '重试此段');
-        retry.title = paragraph.error;
-        retry.addEventListener('click', () => retryParagraph(paragraph.id, retry));
-        target.append(retry);
-      }
+      if (retainedParts.length) target.append(details);
+      const retry = node('button', 'retained-translation-retry', '重新翻译此段');
+      retry.title = paragraph.error || '根据完整原文生成译文，已保存的旧译文保留在历史中';
+      retry.addEventListener('click', () => retryParagraph(paragraph.id, retry));
+      target.append(retry);
     }
     else if (paragraph.error) {
       delete target.dataset.textSignature;
       delete target.dataset.mathSearchHit;
+      delete target.dataset.inlineSignature;
       target.classList.add('failed');
       target.replaceChildren();
       target.append(node('span', '', '这一段暂未译出，可重试继续。'));
@@ -400,6 +456,7 @@ function renderParagraphs(force = false) {
     } else {
       delete target.dataset.textSignature;
       delete target.dataset.mathSearchHit;
+      delete target.dataset.inlineSignature;
       // Empty translations take no space. A single instruction lives in the article header.
       target.replaceChildren();
     }

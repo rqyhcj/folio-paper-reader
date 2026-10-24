@@ -17,7 +17,7 @@ _MATH_FONT = re.compile(r"(?:CMMI|CMMIB|CMSY|CMEX|MSAM|MSBM|Math|Symbol)", re.I)
 _CM_FONT = re.compile(r"(?:^|\+)(?:CM(?:R|BX|TI|MI|MIB|SY)|MSBM)\d", re.I)
 _NUMBER = re.compile(r"^\s*[（(](\d+[a-z]?)[）)]\s*$", re.I)
 _OPERATORS = {"arg", "min", "max", "argmin", "argmax", "sin", "cos", "tan", "log", "ln",
-              "exp", "lim", "sup", "inf", "det", "diag", "rank", "tr", "SVD", "SVDk", "ReLU"}
+              "exp", "lim", "sup", "inf", "det", "diag", "rank", "tr", "Tr", "Var", "Cov", "Pr", "SVD", "SVDk", "ReLU"}
 _GREEK_NAMES = {
     "α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta", "ε": "epsilon", "ϵ": "varepsilon",
     "ζ": "zeta", "η": "eta", "θ": "theta", "ϑ": "vartheta", "ι": "iota", "κ": "kappa",
@@ -300,6 +300,84 @@ def recover_inline(spans: list[dict], original: str) -> tuple[str, bool]:
     return "".join(result).strip(), True
 
 
+def _protect_inline_translation(paragraph: dict, lines: list) -> None:
+    """Send prose plus opaque formula slots, never broken PDF math, to a model.
+
+    The original coordinates remain local. Adjacent mathematical runs spanning
+    two physical rows share one slot with multiple source rectangles, so the
+    translator cannot mistake a root's decoded ``p`` for prose or invent its
+    radicand. A formula with trustworthy character geometry may also supply
+    TeX for display; this does not change the protected translation input.
+    """
+    result = []
+    slots = []
+    slot_spans = []
+    active = None
+    for line in lines:
+        chunks = []
+        for span in line.spans:
+            if not span.get("text", "").strip():
+                continue
+            mathematical = _is_context(span)
+            if chunks and chunks[-1][0] == mathematical:
+                chunks[-1][1].append(span)
+            else:
+                chunks.append((mathematical, [span]))
+        for mathematical, spans in chunks:
+            if not mathematical:
+                text = _span_text(spans).strip()
+                if text:
+                    result.append(text)
+                    active = None
+                continue
+            if active is None:
+                number = len(slots) + 1
+                active = {"id": f"m-{number}", "placeholder": f"⟦FOLIO_MATH_{number}⟧", "source": []}
+                slots.append(active)
+                slot_spans.append([])
+                result.append(active["placeholder"])
+            box = [round(min(span["bbox"][0] for span in spans), 3),
+                   round(min(span["bbox"][1] for span in spans), 3),
+                   round(max(span["bbox"][2] for span in spans), 3),
+                   round(max(span["bbox"][3] for span in spans), 3)]
+            # TeX positions a radical glyph above the real row, but its font
+            # bbox includes empty ascent reaching into the preceding prose.
+            # The radicand / numerator gives the physical row's upper bound;
+            # keep that bound for inline crops while the complete original
+            # paragraph region remains unchanged. Unknown delimiters are not
+            # clamped: unlike a recognized radical their ink may be tall.
+            root = lambda span: ("√" in span.get("text", "") or
+                                 ("CMEX" in span.get("font", "").upper()
+                                  and span.get("text", "").strip() in {"p", "q", "r", "s"}))
+            ordinary = [span for span in spans if not root(span)]
+            if ordinary and any(root(span) for span in spans):
+                box[1] = round(min(span["bbox"][1] for span in ordinary), 3)
+            active["source"].append({"page": paragraph["page"], "bbox": box})
+            slot_spans[len(slots) - 1].extend(spans)
+    if not slots:
+        return
+    for slot, spans in zip(slots, slot_spans):
+        latex = recover_expression(spans)
+        if latex:
+            slot["latex"] = latex
+    from .pdf_parser import _join_lines
+    paragraph["translation_text"] = _join_lines(result)
+    paragraph["inline_math"] = slots
+
+
+def _ambiguous_inline_math(lines: list) -> bool:
+    for line in lines:
+        run = []
+        for span in [*line.spans, None]:
+            if span is not None and _is_context(span):
+                run.append(span)
+                continue
+            if any(_is_seed(item) for item in run) and recover_expression(run) is None:
+                return True
+            run = []
+    return False
+
+
 def recover_paragraph(paragraph: dict, lines: list) -> dict:
     """Annotate a parsed paragraph without exposing raw PDF spans in the API."""
     if paragraph["kind"] == "equation":
@@ -318,7 +396,7 @@ def recover_paragraph(paragraph: dict, lines: list) -> dict:
         return paragraph
     if paragraph["kind"] == "heading":
         return paragraph
-    if any("CMEX" in span.get("font", "").upper() for line in lines for span in line.spans):
+    if _ambiguous_inline_math(lines):
         # Large inline roots / delimiters can decode as unrelated ASCII
         # letters (e.g. CMEX's "q" is a radical). Preserve the entire prose
         # region rather than presenting a convincing but false inline formula.
@@ -332,6 +410,7 @@ def recover_paragraph(paragraph: dict, lines: list) -> dict:
         paragraph["equation_source"] = {"page": paragraph["page"], "bbox": box}
         paragraph["equation_image"] = {"width": max(1, round(box[2] - box[0])),
                                        "height": max(1, round(box[3] - box[1])), "latex_available": False}
+        _protect_inline_translation(paragraph, lines)
         return paragraph
     changed = False
     texts = []

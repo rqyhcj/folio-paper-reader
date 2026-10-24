@@ -177,6 +177,37 @@ assert.notEqual(changedCrop.src, firstCropUrl);
 vm.runInContext('renderEquationSource(element, paragraph);', context);
 assert.equal(walk(crop).find((item) => item.nodeName === 'IMG'), changedCrop);
 
+// A pure TeX provider reply without delimiters renders, while prose and paths
+// remain unchanged; no mathematical content is inferred or rewritten.
+const bare = new TestNode('p');
+context.element = bare;
+vm.runInContext("paragraphText(element, String.raw`t \\cdot x_{t} - \\sqrt{\\bar{\\alpha}_t} x_0`);", context);
+assert.equal(withClass(bare, 'katex').length, 1);
+for (const value of ['中文 \\sqrt{x}', 'Use \\sqrt{x} in code.', 'C:\\math\\sqrt{files}', '\\sqrt{x', '$x$', '\\href{https://example.invalid}{x} \\sqrt{x}']) {
+  context.sampleText = value;
+  assert.equal(vm.runInContext('normalizeMathText(sampleText)', context), value);
+}
+
+// The Chinese translation inserts original formula pieces at the protected
+// positions. Prose is literal DOM text, formulas may only link to local crops.
+const protectedTarget = new TestNode('div');
+context.element = protectedTarget;
+context.paragraph = { id: 'p-protected', inline_math: [
+  {id:'m-1', placeholder:'⟦FOLIO_MATH_1⟧', latex:'x_{t}', source:[]},
+  {id:'m-2', placeholder:'⟦FOLIO_MATH_2⟧', source:[{page:3,bbox:[310,460,450,480]},{page:3,bbox:[310,480,360,500]}]},
+] };
+context.translated = '其中 ⟦FOLIO_MATH_1⟧ 表示 <script>alert(1)</script>，其均值为 ⟦FOLIO_MATH_2⟧。';
+vm.runInContext('translatedParagraphText(element, translated, paragraph);', context);
+assert.equal(withClass(protectedTarget, 'katex').length, 1);
+const protectedImages = walk(protectedTarget).filter((item) => item.nodeName === 'IMG');
+assert.equal(protectedImages.length, 2);
+assert.ok(protectedImages.every((item) => item.src.startsWith('/api/papers/local-paper/inline-math/p-protected/m-2/')));
+assert.ok(protectedTarget.textContent.includes('<script>alert(1)</script>'));
+assert.ok(!walk(protectedTarget).some((item) => item.nodeName === 'SCRIPT'));
+assert.ok(!protectedTarget.textContent.includes('FOLIO_MATH'));
+vm.runInContext('translatedParagraphText(element, translated, paragraph);', context);
+assert.equal(walk(protectedTarget).find((item) => item.nodeName === 'IMG'), protectedImages[0]);
+
 // Asset references must remain local, including the stylesheet's font files.
 const index = read('static/index.html');
 assert.ok(index.includes('src="/vendor/katex/katex.min.js"'));

@@ -13,6 +13,7 @@ import re
 import unicodedata
 
 from .storage import refresh_progress, translation_paragraphs
+from .translation_quality import response_issue
 
 
 def _source(paragraph: dict) -> str:
@@ -93,6 +94,59 @@ def _covered_paths(target: str, candidates: list[dict]) -> list[list[dict]]:
     return complete
 
 
+def _legacy_composition(paragraph: dict, history: list[dict]) -> list[dict] | None:
+    """Recognize a previous reflow's verbatim concatenation, never infer one.
+
+    A complete covering of English source says nothing about the grammatical
+    order of separately translated Chinese clauses. Older versions joined
+    these translations with newlines; identify that exact fingerprint so an
+    unchanged source cannot make the invalid composition look trustworthy.
+    """
+    translation = paragraph.get("translation") or ""
+    if "\n" not in translation:
+        return None
+    target = _normal(_source(paragraph))
+    box = _box(paragraph.get("bbox"))
+    fingerprint = _normal(translation)
+    for entry in history:
+        candidates = []
+        for index, prior in enumerate(entry.get("paragraphs") or []):
+            normal = _normal(_source(prior))
+            if (not prior.get("translation") or prior.get("page") != paragraph.get("page")
+                    or not normal or normal == target
+                    or _overlap(_box(prior.get("bbox")), box, fragment=True) < .65):
+                continue
+            if normal in target or (re.search(r"[A-Za-z]-$", _source(prior).rstrip()) and normal[:-1] in target):
+                candidates.append({"paragraph": prior, "index": index, "normal": normal})
+        for path in _covered_paths(target, candidates):
+            if len(path) > 1 and _normal("\n".join(item["paragraph"]["translation"] for item in path)) == fingerprint:
+                return [item["paragraph"] for item in path]
+    return None
+
+
+def review_saved_translation(paragraph: dict, history: list[dict] | None = None,
+                             *, target: dict | None = None) -> dict | None:
+    """Describe a cached result that must not be reused as a finished translation.
+
+    The result is read-only diagnostic data. The caller retains the original
+    record in ``translation_history``; ``parts`` contains only useful previous
+    translations suitable for a clearly labelled, collapsed reference view.
+    """
+    text = paragraph.get("translation")
+    if not text:
+        return None
+    if response_issue(text, _source(paragraph)):
+        return {"reason": "model-requested-source", "parts": []}
+    protected = re.findall(r"⟦FOLIO_MATH_\d+⟧", str((target or paragraph).get("translation_text") or ""))
+    if protected and Counter(protected) != Counter(re.findall(r"⟦FOLIO_MATH_\d+⟧", text)):
+        return {"reason": "protected-math-source", "parts": []}
+    previous = _legacy_composition(paragraph, history or [])
+    if previous:
+        return {"reason": "paragraph-reassembled", "parts": [_part(item) for item in previous
+                if not response_issue(item["translation"], _source(item))]}
+    return None
+
+
 def reflow_paper(old: dict, parsed: dict, positions: dict | None = None) -> dict:
     """Return a new paper using parsed IDs/outline and preserving every prior result.
 
@@ -120,7 +174,8 @@ def reflow_paper(old: dict, parsed: dict, positions: dict | None = None) -> dict
     records, exact = [], defaultdict(list)
     for index, paragraph in enumerate(old["paragraphs"]):
         item = {"paragraph": paragraph, "index": index, "normal": _normal(_source(paragraph)),
-                "box": _box(positions.get(paragraph["id"])) or _box(paragraph.get("bbox"))}
+                "box": _box(positions.get(paragraph["id"])) or _box(paragraph.get("bbox")),
+                "review": review_saved_translation(paragraph, old.get("translation_history") or [])}
         records.append(item)
         if item["normal"]:
             exact[(paragraph.get("page"), item["normal"])].append(item)
@@ -129,6 +184,7 @@ def reflow_paper(old: dict, parsed: dict, positions: dict | None = None) -> dict
     for paragraph in result["paragraphs"]:
         paragraph.update(translation=None, error=None)
         paragraph.pop("previous_translation_parts", None)
+        paragraph.pop("translation_review_reason", None)
         if paragraph.get("kind") == "equation":
             continue
         normal = _normal(_source(paragraph))
@@ -148,15 +204,29 @@ def reflow_paper(old: dict, parsed: dict, positions: dict | None = None) -> dict
             if spatial[0][0] >= .5 and (len(spatial) == 1 or spatial[0][0] - spatial[1][0] >= .2):
                 chosen = spatial[0][1]
         if chosen is not None:
-            if chosen["paragraph"].get("translation"):
+            review = chosen["review"] or review_saved_translation(chosen["paragraph"], target=paragraph)
+            if review:
+                paragraph["translation_review_reason"] = review["reason"]
+                if review["parts"]:
+                    paragraph["previous_translation_parts"] = deepcopy(review["parts"])
+            elif chosen["paragraph"].get("translation"):
                 paragraph["translation"] = chosen["paragraph"]["translation"]
+            elif chosen["paragraph"].get("previous_translation_parts"):
+                safe_parts = [part for part in chosen["paragraph"]["previous_translation_parts"]
+                              if part.get("translation") and not response_issue(part["translation"], part.get("text", ""))]
+                if safe_parts:
+                    paragraph["previous_translation_parts"] = deepcopy(safe_parts)
+                paragraph["translation_review_reason"] = "paragraph-reassembled"
+            elif chosen["paragraph"].get("translation_review_reason"):
+                paragraph["translation_review_reason"] = chosen["paragraph"]["translation_review_reason"]
             used.add(chosen["index"])
             continue
 
         candidates, partial = [], []
         for item in records:
             source = item["paragraph"]
-            if (item["index"] in used or not source.get("translation") or source.get("page") != paragraph.get("page")
+            if (item["index"] in used or not source.get("translation") or item["review"]
+                    or source.get("page") != paragraph.get("page")
                     or not item["normal"] or _overlap(item["box"], new_box, fragment=True) < .65):
                 continue
             if item["normal"] in normal:
@@ -178,10 +248,12 @@ def reflow_paper(old: dict, parsed: dict, positions: dict | None = None) -> dict
         paths = _covered_paths(normal, candidates)
         if len(paths) == 1:
             selected = paths[0]
-            paragraph["translation"] = "\n".join(item["paragraph"]["translation"] for item in selected)
+            paragraph["previous_translation_parts"] = [_part(item["paragraph"]) for item in selected]
+            paragraph["translation_review_reason"] = "paragraph-reassembled"
             used.update(item["index"] for item in selected)
         elif partial:
             paragraph["previous_translation_parts"] = [_part(item["paragraph"]) for item in partial]
+            paragraph["translation_review_reason"] = "paragraph-reassembled"
 
     refresh_progress(result)
     if all(p.get("translation") for p in translation_paragraphs(result)):

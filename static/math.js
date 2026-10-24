@@ -6,6 +6,26 @@ const DELIMITERS = [
   { left: '$', right: '$', display: false },
 ];
 
+// Some compatible providers omit delimiters around a response containing only
+// TeX. Add delimiters only to an unambiguous mathematical expression; do not
+// infer equations from prose, paths, code or malformed brace groups.
+export function normalizeMathText(text) {
+  if (typeof text !== 'string' || !/\\(?:frac|sqrt|cdot|sum|prod|int|alpha|beta|sigma|epsilon|mu|theta|bar|hat)\b/.test(text)) return text;
+  if (/[$\u3400-\u9fff`]/u.test(text) || /\\[()[\]]/.test(text)) return text;
+  const allowed = new Set(['frac', 'sqrt', 'cdot', 'times', 'sum', 'prod', 'int', 'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'varepsilon', 'sigma', 'mu', 'theta', 'lambda', 'pi', 'rho', 'phi', 'psi', 'omega', 'bar', 'hat', 'tilde', 'vec', 'mathbf', 'mathbb', 'mathrm', 'boldsymbol', 'left', 'right', 'le', 'ge', 'ne', 'in', 'sim', 'approx', 'partial', 'nabla', 'infty']);
+  const commands = [...text.matchAll(/\\([A-Za-z]+)/g)].map((match) => match[1]);
+  if (commands.some((command) => !allowed.has(command))) return text;
+  const remaining = text.replace(/\\[A-Za-z]+\s*/g, '').replace(/\\[,;! ]/g, '');
+  if (/[A-Za-z]{2}|[^A-Za-z0-9\s{}_^+\-−=.,:;!|()\[\]<>*/\u0370-\u03ff]/u.test(remaining)) return text;
+  let braces = 0;
+  for (const char of remaining) {
+    if (char === '{') braces++;
+    else if (char === '}' && --braces < 0) return text;
+  }
+  if (braces) return text;
+  return `\\(${text.trim()}\\)`;
+}
+
 function closingDelimiter(text, start, right) {
   let braces = 0;
   for (let index = start; index < text.length; index++) {

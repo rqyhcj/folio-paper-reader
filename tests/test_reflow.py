@@ -1,7 +1,7 @@
 """Saved translations survive a safer reparse without guessed paragraph matches."""
 from copy import deepcopy
 
-from backend.reflow import reflow_paper
+from backend.reflow import reflow_paper, review_saved_translation
 
 
 def paragraph(pid, text, *, page=1, bbox=None, translation=None, error=None, **extra):
@@ -73,22 +73,26 @@ def test_only_one_translated_repeated_occurrence_does_not_remove_spatial_ambigui
     assert result["paragraphs"][0]["previous_translation_parts"] == [dict(id="a", text="x", translation="旧变量")]
 
 
-def test_complete_ordered_fragments_merge_only_with_full_source_coverage():
+def test_complete_source_coverage_does_not_make_separately_translated_clauses_a_complete_translation():
     old = paper([paragraph("line-1", "A complete", translation="完整的", bbox=[60, 100, 180, 112]),
                  paragraph("line-2", "source paragraph.", translation="原文段落。", bbox=[60, 114, 230, 126])])
     new = parsed([paragraph("p-1", "A complete source paragraph.", bbox=[60, 100, 230, 126])])
     result = reflow_paper(old, new)
-    assert result["paragraphs"][0]["translation"] == "完整的\n原文段落。"
-    assert "previous_translation_parts" not in result["paragraphs"][0]
-    assert result["status"] == "completed"
-    assert result["progress"] == dict(total=1, done=1, failed=0)
+    target = result["paragraphs"][0]
+    assert target["translation"] is None
+    assert target["previous_translation_parts"] == [dict(id=p["id"], text=p["text"], translation=p["translation"])
+                                                     for p in old["paragraphs"]]
+    assert target["translation_review_reason"] == "paragraph-reassembled"
+    assert result["status"] == "paused"
+    assert result["progress"] == dict(total=1, done=0, failed=0)
 
 
 def test_a_line_end_word_break_can_be_rejoined_without_losing_either_saved_translation():
     old = paper([paragraph("line-1", "A quantiza-", translation="量化", bbox=[60, 100, 180, 112]),
                  paragraph("line-2", "tion method.", translation="方法。", bbox=[60, 114, 230, 126])])
     result = reflow_paper(old, parsed([paragraph("p-1", "A quantization method.", bbox=[60, 100, 230, 126])]))
-    assert result["paragraphs"][0]["translation"] == "量化\n方法。"
+    assert result["paragraphs"][0]["translation"] is None
+    assert [p["translation"] for p in result["paragraphs"][0]["previous_translation_parts"]] == ["量化", "方法。"]
 
 
 def test_partial_saved_fragments_stay_explicitly_incomplete():
@@ -127,3 +131,74 @@ def test_unmatched_translations_and_existing_history_survive_and_equations_are_n
     assert result["translation_history"][0] == old["translation_history"][0]
     assert {p["translation"] for p in result["translation_history"][-1]["paragraphs"]} == {"旧公式译文", "不能丢失的译文"}
     assert result["status"] == "completed" and result["progress"]["total"] == 0
+
+
+def test_previously_composed_translation_is_not_reused_by_an_exact_source_match():
+    fragments = [paragraph("old-1", "Sampling starts from noise", bbox=[50, 100, 260, 112],
+                           translation="采样从噪声开始，求解如下方程。"),
+                 paragraph("old-2", "N(0,I), which matches the ground-", bbox=[50, 114, 260, 126],
+                           translation="N(0,I)，这与 ground- 相匹配"),
+                 paragraph("old-3", "truth dynamics.", bbox=[50, 128, 160, 140], translation="真实动力学。")]
+    joined = paragraph("current", "Sampling starts from noise N(0,I), which matches the groundtruth dynamics.",
+                       bbox=[50, 100, 260, 140], translation="\n".join(p["translation"] for p in fragments))
+    old = paper([joined], translation_history=[{"parse_version": 1, "paragraphs": fragments}])
+    result = reflow_paper(old, parsed([paragraph("new", joined["text"], bbox=joined["bbox"])]))
+    target = result["paragraphs"][0]
+    assert target["translation"] is None
+    assert target["translation_review_reason"] == "paragraph-reassembled"
+    assert [p["id"] for p in target["previous_translation_parts"]] == ["old-1", "old-2", "old-3"]
+    assert result["translation_history"][0]["paragraphs"] == fragments
+    assert result["translation_history"][-1]["paragraphs"] == [joined]
+
+
+def test_complete_translation_of_reassembled_source_is_preserved_when_not_an_old_concatenation():
+    fragments = [paragraph("a", "A complete", bbox=[50, 100, 200, 112], translation="完整的"),
+                 paragraph("b", "source paragraph.", bbox=[50, 114, 240, 126], translation="原文段落。")]
+    joined = paragraph("current", "A complete source paragraph.", bbox=[50, 100, 240, 126],
+                       translation="这是完整原文段落的通顺译文。\n其中包括整体句意。")
+    old = paper([joined], translation_history=[{"paragraphs": fragments}])
+    result = reflow_paper(old, parsed([paragraph("new", joined["text"], bbox=joined["bbox"])]))
+    assert result["paragraphs"][0]["translation"] == joined["translation"]
+    assert "translation_review_reason" not in result["paragraphs"][0]
+
+
+def test_request_for_source_reply_is_archived_without_becoming_visible_translation_or_prior_part():
+    reply = "您提供的消息中只有字符“p”，没有可供翻译的论文片段。请粘贴需要翻译的英文原文。"
+    bad = paragraph("fragment", "p", bbox=[80, 100, 88, 112], translation=reply)
+    old = paper([bad])
+    exact = reflow_paper(old, parsed([paragraph("p-1", "p", bbox=bad["bbox"])]))
+    assert exact["paragraphs"][0]["translation"] is None
+    assert exact["paragraphs"][0]["translation_review_reason"] == "model-requested-source"
+    assert "previous_translation_parts" not in exact["paragraphs"][0]
+    expanded = reflow_paper(old, parsed([paragraph("p-1", "A value p describes the distribution.", bbox=[60, 100, 260, 112])]))
+    assert expanded["paragraphs"][0]["translation"] is None
+    assert "previous_translation_parts" not in expanded["paragraphs"][0]
+    assert expanded["translation_history"][-1]["paragraphs"][0]["translation"] == reply
+
+
+def test_protected_math_input_does_not_inherit_an_unguarded_formula_guess():
+    source = "where sigma controls stochasticity."
+    old = paper([paragraph("old", source, translation=r"其中 $\sigma=0$ 控制随机性。")])
+    new = paragraph("new", source, translation_text="where ⟦FOLIO_MATH_1⟧ controls stochasticity.",
+                    inline_math=[{"id": "FOLIO_MATH_1"}])
+    result = reflow_paper(old, parsed([new]))
+    target = result["paragraphs"][0]
+    assert target["translation"] is None
+    assert target["translation_review_reason"] == "protected-math-source"
+    assert "previous_translation_parts" not in target
+    assert result["translation_history"][-1]["paragraphs"] == old["paragraphs"]
+
+
+def test_protected_math_translation_with_exact_matching_tokens_can_be_reused():
+    text = "where ⟦FOLIO_MATH_1⟧ controls stochasticity."
+    translated = "其中 ⟦FOLIO_MATH_1⟧ 控制随机性。"
+    old = paper([paragraph("old", text, translation=translated, translation_text=text)])
+    result = reflow_paper(old, parsed([paragraph("new", text, translation_text=text)]))
+    assert result["paragraphs"][0]["translation"] == translated
+
+
+def test_review_saved_translation_does_not_modify_inputs():
+    saved = paragraph("old", "p", translation="请提供需要翻译的英文论文片段。")
+    before = deepcopy(saved)
+    assert review_saved_translation(saved) == {"reason": "model-requested-source", "parts": []}
+    assert saved == before

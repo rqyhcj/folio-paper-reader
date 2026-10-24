@@ -31,6 +31,7 @@ from .pdf_export import export_pdf
 from .math_html import offline_math_assets
 from .page_view import equation_png, router as page_view_router
 from .pdf_runtime import PDF_LOCK
+from .translation_input import paragraph_input, validate_translation
 
 jobs: dict[str, asyncio.Task] = {}
 figure_jobs: dict[str, asyncio.Task] = {}
@@ -308,7 +309,7 @@ async def translation_job(paper_id: str, config: dict, paragraph_ids: list[str] 
                     queue.task_done()
                     continue
                 try:
-                    translated = await translate_text(source["text"], config)
+                    translated = validate_translation(source, await translate_text(paragraph_input(source), config))
                     error = None
                 except TranslationError as exc:
                     translated, error = None, str(exc)
@@ -317,6 +318,9 @@ async def translation_job(paper_id: str, config: dict, paragraph_ids: list[str] 
                 paper = paper_or_404(paper_id)
                 target = next(p for p in paper["paragraphs"] if p["id"] == pid)
                 target.update(translation=translated, error=error)
+                if translated:
+                    target.pop("translation_review_reason", None)
+                    target.pop("previous_translation_parts", None)
                 db.save_paper(db.refresh_progress(paper))
                 queue.task_done()
 
@@ -450,6 +454,9 @@ def original(paper_id: str):
 
 @app.get("/api/papers/{paper_id}/export")
 async def export(paper_id: str, format: str = "markdown"):
+    from .inline_math_export import html_with_math, text_with_math
+    from .page_view import inline_math_png
+
     paper = paper_or_404(paper_id)
     if format not in ("markdown", "html", "pdf"):
         raise HTTPException(400, "支持导出 markdown、html 或 pdf。")
@@ -461,6 +468,7 @@ async def export(paper_id: str, format: str = "markdown"):
         paper = paper_or_404(paper_id)
     title = paper["title"]
     equation_paths = {}
+    inline_paths = {}
     if format in ("pdf", "html"):
         for paragraph in paper["paragraphs"]:
             if paragraph.get("math_status") == "source-image":
@@ -469,9 +477,18 @@ async def export(paper_id: str, format: str = "markdown"):
                 except Exception:
                     # Exporters render a readable placeholder when the original crop is unavailable.
                     pass
+            for slot in paragraph.get("inline_math") or []:
+                if slot.get("latex"):
+                    continue
+                for index, _ in enumerate(slot.get("source") or []):
+                    try:
+                        inline_paths[(paragraph["id"], slot["id"], index)] = await asyncio.to_thread(
+                            inline_math_png, paper, paragraph["id"], slot["id"], index)
+                    except Exception:
+                        pass
     if format == "pdf":
         paths = {f["id"]: figure_dir(paper_id) / f"{f['id']}.png" for f in paper.get("figures", [])}
-        content = await asyncio.to_thread(export_pdf, paper, paths, equation_paths)
+        content = await asyncio.to_thread(export_pdf, paper, paths, equation_paths, inline_paths)
         media, extension = "application/pdf", "pdf"
     elif format == "html":
         sections = []
@@ -507,9 +524,9 @@ async def export(paper_id: str, format: str = "markdown"):
                     equation = f'<p class="en">{html.escape(p["text"])}</p>'
                 section += f'<section class="equation">{equation}</section>'
                 if p.get("kind") != "equation":
-                    section += f'<p class="zh">{html.escape(p.get("translation") or "[尚未翻译]")}</p>'
+                    section += f'<p class="zh">{html_with_math(p, p.get("translation") or "[尚未翻译]", inline_paths)}</p>'
             else:
-                section += f'<section><{tag} class="en">{html.escape(p["text"])}</{tag}><p class="zh">{html.escape(p.get("translation") or "[尚未翻译]")}</p></section>'
+                section += f'<section><{tag} class="en">{html.escape(p["text"])}</{tag}><p class="zh">{html_with_math(p, p.get("translation") or "[尚未翻译]", inline_paths)}</p></section>'
             for f in paper.get("figures", []):
                 if not f.get("before_paragraph_id") and f.get("after_paragraph_id") == p["id"]:
                     section += image_html(f)
@@ -522,7 +539,8 @@ async def export(paper_id: str, format: str = "markdown"):
     else:
         chunks = [f"# {title}", "纸间 · 英中对照阅读"]
         for p in paper["paragraphs"]:
-            chunks.extend([("## " if p["kind"] == "heading" else "") + p["text"], p.get("translation") or "[尚未翻译]"])
+            chunks.extend([("## " if p["kind"] == "heading" else "") + p["text"],
+                           text_with_math(p, p.get("translation") or "[尚未翻译]", markdown=True)])
         content, media, extension = "\n\n".join(chunks), "text/markdown", "md"
     return Response(content, media_type=media, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(title[:100] + '.' + extension)}"})
 
