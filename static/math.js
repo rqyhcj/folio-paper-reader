@@ -64,17 +64,126 @@ export function splitMathText(text) {
 
 const waiting = new Set();
 let waitingForScripts = false;
+const rendered = new WeakMap();
+const detailsWaiting = new Map();
+const observed = new Set();
+let nearViewport = new WeakSet();
+let mathObserver = null;
+let pruneQueued = false;
+
+function stopObserving(element) {
+  mathObserver?.unobserve(element);
+  observed.delete(element);
+  nearViewport.delete(element);
+}
+
+function renderedUnchanged(element) {
+  const previous = rendered.get(element);
+  return previous && previous.text === element.textContent && previous.firstChild === element.childNodes[0];
+}
+
+function waitForClosedDetails(element) {
+  for (let parent = element.parentNode; parent; parent = parent.parentNode) {
+    if (parent.nodeName !== 'DETAILS' || parent.open) continue;
+    let record = detailsWaiting.get(parent);
+    if (!record) {
+      record = { elements: new Set(), handler: null };
+      record.handler = () => {
+        if (!parent.open || detailsWaiting.get(parent) !== record) return;
+        const targets = [...record.elements];
+        releaseDetails(parent, record);
+        for (const target of targets) if (target.isConnected) renderMath(target);
+      };
+      detailsWaiting.set(parent, record);
+      parent.addEventListener('toggle', record.handler);
+    }
+    record.elements.add(element);
+    waiting.delete(element);
+    stopObserving(element);
+    return true;
+  }
+  return false;
+}
+
+function releaseDetails(details, record) {
+  record.elements.clear();
+  details.removeEventListener?.('toggle', record.handler);
+  detailsWaiting.delete(details);
+}
+
+// Call after article DOM updates, including updates that contain no new math.
+// Browser observers do not guarantee a second false entry for a removed target
+// that was already offscreen, so callbacks alone cannot release old papers.
+export function pruneMathObservations() {
+  for (const element of observed) {
+    if (!element.isConnected) { stopObserving(element); waiting.delete(element); }
+  }
+  for (const element of waiting) if (!element.isConnected) waiting.delete(element);
+  for (const [details, record] of detailsWaiting) {
+    for (const element of record.elements) if (!element.isConnected) record.elements.delete(element);
+    if (!details.isConnected || !record.elements.size) releaseDetails(details, record);
+  }
+}
+
+// Fresh imports and the welcome screen release all pending work immediately;
+// the next paper can reuse the observer without retaining any previous target.
+export function clearMathObservations() {
+  mathObserver?.disconnect();
+  observed.clear();
+  waiting.clear();
+  nearViewport = new WeakSet();
+  for (const [details, record] of detailsWaiting) releaseDetails(details, record);
+}
+
+function getMathObserver() {
+  if (mathObserver) return mathObserver;
+  const root = document.getElementById('reader-scroll');
+  if (!root || typeof window.IntersectionObserver !== 'function') return null;
+  try {
+    mathObserver = new window.IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const element = entry.target;
+        if (!observed.has(element)) continue;
+        if (!element.isConnected) { stopObserving(element); waiting.delete(element); continue; }
+        if (!entry.isIntersecting) { nearViewport.delete(element); continue; }
+        nearViewport.add(element);
+        // The observer has already established visibility. Do not queue this
+        // element through renderMath again or it would never reach KaTeX.
+        renderMathNow(element);
+      }
+    }, { root, rootMargin: '800px 0px', threshold: 0 });
+  } catch {
+    // Older webviews still get the same synchronous, safe renderer.
+    return null;
+  }
+  return mathObserver;
+}
+
+function pruneDetached() {
+  if (pruneQueued) return;
+  pruneQueued = true;
+  // Translation spans are queued before being appended. Wait until the DOM
+  // update finishes, then release observations belonging to the previous paper.
+  Promise.resolve().then(() => {
+    pruneQueued = false;
+    pruneMathObservations();
+  });
+}
 
 function flushWaiting() {
   if (typeof window.renderMathInElement !== 'function') return;
   for (const element of waiting) {
     waiting.delete(element);
-    if (element.isConnected) renderMath(element);
+    if (!element.isConnected) { stopObserving(element); continue; }
+    // An element may have scrolled away while the local scripts were loading.
+    if (observed.has(element) && !nearViewport.has(element)) continue;
+    renderMathNow(element);
   }
 }
 
-export function renderMath(element) {
-  if (!element) return false;
+function renderMathNow(element) {
+  if (renderedUnchanged(element)) { stopObserving(element); return true; }
+  if (waitForClosedDetails(element)) return false;
   if (typeof window.renderMathInElement !== 'function') {
     waiting.add(element);
     if (!waitingForScripts) {
@@ -96,9 +205,32 @@ export function renderMath(element) {
       // Formula syntax errors remain visible as source text, without console noise.
       errorCallback: () => {},
     });
+    rendered.set(element, { text: element.textContent, firstChild: element.childNodes[0] });
+    stopObserving(element);
     return true;
   } catch {
     // A malformed expression must never interrupt reading the rest of the paper.
+    stopObserving(element);
     return false;
   }
+}
+
+export function renderMath(element) {
+  if (!element) return false;
+  if (renderedUnchanged(element)) return true;
+  // Most paper paragraphs contain no TeX. Neither observe them nor build a
+  // second mathematical DOM tree until a complete delimited formula is present.
+  if (!splitMathText(element.textContent).some((part) => part.math)) {
+    waiting.delete(element);
+    rendered.delete(element);
+    stopObserving(element);
+    return true;
+  }
+  if (waitForClosedDetails(element)) return false;
+  const observer = getMathObserver();
+  if (!observer) return renderMathNow(element);
+  observed.add(element);
+  observer.observe(element);
+  pruneDetached();
+  return false;
 }

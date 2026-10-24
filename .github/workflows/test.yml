@@ -26,3 +26,7 @@ jobs:
         run: node tests/test_reading_position.cjs
       - name: Check multi-format imports
         run: node tests/test_import_formats.cjs
+      - name: Check viewport math scheduling
+        run: node tests/test_math_viewport.cjs
+      - name: Check incremental paper updates
+        run: node tests/test_poll_rendering.cjs

@@ -27,6 +27,7 @@ const sandbox = {
   renderOriginalPages() { observed.originalRenders++; return false; }, setOriginalPage() {}, updateReadingPosition() {},
   updateSummary(paper) { observed.summaries.push(paper.id); }, schedulePoll() {}, requestAnimationFrame() {},
   clearTimeout() {}, closeSidebar() {}, closeSearch() {},
+  clearMathObservations() {},
   toast(...value) { observed.toasts.push(value); },
   async api(...value) { observed.requests.push(value); return { id: 'imported', filename: value[1].body.values[0][1].name, source_format: 'docx', paragraphs: [] }; },
 };

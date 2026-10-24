@@ -1,6 +1,6 @@
 import { initAppearance } from './appearance.js';
 import { initLayout } from './layout.js';
-import { normalizeMathText, renderMath, splitMathText } from './math.js?v=inline-formulas-5';
+import { normalizeMathText, renderMath, splitMathText, clearMathObservations, pruneMathObservations } from './math.js?v=viewport-scroll-7';
 
 const $ = (id) => document.getElementById(id);
 const icon = (name) => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -96,6 +96,12 @@ function switchSidebarTab(tab) {
 }
 
 function renderLibrary() {
+  const signature = JSON.stringify([state.paper?.id, state.papers.map((paper) => [
+    paper.id, paper.title, paper.filename, documentMeta(paper), paper.translated_count,
+    paper.progress?.total, paper.paragraph_count, paper.status,
+  ])]);
+  if (state.librarySignature === signature) return;
+  state.librarySignature = signature;
   $('library-count').textContent = state.papers.length;
   $('library-empty').hidden = state.papers.length > 0;
   const fragment = document.createDocumentFragment();
@@ -131,9 +137,12 @@ function renderLibrary() {
 }
 
 function updateSummary(paper) {
-  const summary = { ...paper };
-  delete summary.paragraphs;
-  delete summary.outline;
+  // Keep the library small: full translation history and artwork belong only
+  // to the open paper, not to a second retained copy in every library item.
+  const summary = Object.fromEntries([
+    'id', 'title', 'filename', 'source_format', 'page_count', 'paragraph_count',
+    'translated_count', 'progress', 'created_at', 'status', 'is_demo',
+  ].map((key) => [key, paper[key]]));
   const existing = state.papers.findIndex((p) => p.id === paper.id);
   if (existing >= 0) state.papers[existing] = summary;
   else state.papers.unshift(summary);
@@ -147,6 +156,7 @@ function showView(name) {
 }
 
 function showWelcome() {
+  clearMathObservations();
   clearTimeout(state.poll);
   state.loadToken++;
   state.paper = null;
@@ -159,6 +169,7 @@ function showWelcome() {
   state.activeOutline = null;
   state.loading = false;
   $('breadcrumb-title').textContent = '开始探索';
+  $('paragraphs').replaceChildren();
   $('outline-list').replaceChildren();
   $('outline-count').textContent = '';
   $('outline-empty').hidden = false;
@@ -260,40 +271,57 @@ function displayPaper(paper, fresh = false) {
   const wasDemo = state.paper?.id === paper.id && state.paper?.is_demo;
   state.paper = paper;
   if (wasDemo) state.paper.is_demo = true;
+  const signatures = {
+    metadata: JSON.stringify([paper.id, paper.title, paper.filename, paper.created_at,
+      paper.page_count, paper.paragraph_count, paper.source_format, paper.is_demo, paper.warnings]),
+    paragraphs: JSON.stringify([paper.id, paper.parse_version, paper.paragraphs, state.search]),
+    figures: JSON.stringify([paper.id, paper.figures, paper.figures_error]),
+    outline: JSON.stringify([paper.id, paper.outline]),
+    translation: JSON.stringify([paper.id, paper.status, paper.error, paper.progress,
+      paper.paragraph_count, paper.translated_count, state.bilingual]),
+    artwork: JSON.stringify([paper.id, paper.figure_status, paper.figure_progress, paper.page_count]),
+  };
+  const previous = state.displaySignatures || {};
+  const changed = (key) => fresh || newDocument || signatures[key] !== previous[key];
   state.loading = false;
-  showView('reader');
-  $('breadcrumb-title').textContent = paper.title || paper.filename;
-  $('paper-title').textContent = paper.title || paper.filename;
-  $('paper-date').textContent = dateLabel(paper.created_at);
-  $('paper-type').textContent = isDemo(paper) ? 'FOLIO SAMPLE · 示例文稿' : 'YOUR RESEARCH, IN FOCUS';
-  $('paper-pages').textContent = documentMeta(paper);
-  $('paper-paragraphs').textContent = `${paper.paragraph_count || paper.paragraphs?.length || 0} 段`;
-  $('paper-translated').textContent = `已翻译 ${paper.translated_count || 0} 段`;
-  $('paper-translated').hidden = !(paper.translated_count > 0);
-  $('open-original').href = `/api/papers/${encodeURIComponent(paper.id)}/original`;
-  $('open-original').hidden = !!isDemo(paper);
-  $('open-original').title = isPdfPaper(paper) ? '查看原始 PDF' : '下载源文件';
-  $('open-original').setAttribute('aria-label', $('open-original').title);
-  if (isPdfPaper(paper)) {
-    $('open-original').removeAttribute('download');
-    $('open-original').target = '_blank';
-  } else {
-    $('open-original').setAttribute('download', paper.filename || '源文件');
-    $('open-original').removeAttribute('target');
+  if (fresh || newDocument || $('reader-view').hidden) showView('reader');
+  if (changed('metadata')) {
+    $('breadcrumb-title').textContent = paper.title || paper.filename;
+    $('paper-title').textContent = paper.title || paper.filename;
+    $('paper-date').textContent = dateLabel(paper.created_at);
+    $('paper-type').textContent = isDemo(paper) ? 'FOLIO SAMPLE · 示例文稿' : 'YOUR RESEARCH, IN FOCUS';
+    $('paper-pages').textContent = documentMeta(paper);
+    $('paper-paragraphs').textContent = `${paper.paragraph_count || paper.paragraphs?.length || 0} 段`;
+    $('open-original').href = `/api/papers/${encodeURIComponent(paper.id)}/original`;
+    $('open-original').hidden = !!isDemo(paper);
+    $('open-original').title = isPdfPaper(paper) ? '查看原始 PDF' : '下载源文件';
+    $('open-original').setAttribute('aria-label', $('open-original').title);
+    if (isPdfPaper(paper)) {
+      $('open-original').removeAttribute('download');
+      $('open-original').target = '_blank';
+    } else {
+      $('open-original').setAttribute('download', paper.filename || '源文件');
+      $('open-original').removeAttribute('target');
+    }
+    $('original-pdf-fallback').href = $('open-original').href;
+    $('view-pdf').hidden = !isPdfPaper(paper);
+    $('view-pdf').disabled = !!isDemo(paper);
+    $('view-pdf').title = isDemo(paper) ? '示例文稿没有原始 PDF，请导入自己的论文体验原版阅读' : '保留论文原有双栏、图片及公式的位置';
+    if (newDocument) {
+      state.originalPage = 1;
+      $('original-pdf-pages').replaceChildren();
+      state.originalPaperId = null;
+    }
+    const notice = isDemo(paper) ? '示例文稿 · 本文为演示阅读排版而创作，内容与译文仅用于体验，不是真实发表的论文。你可以导入自己的论文或文档，开启正式阅读。' : (paper.warnings || []).join(' ');
+    $('paper-notice').hidden = !notice;
+    $('paper-notice').textContent = notice;
   }
-  $('original-pdf-fallback').href = $('open-original').href;
-  $('view-pdf').hidden = !isPdfPaper(paper);
-  $('view-pdf').disabled = !!isDemo(paper);
-  $('view-pdf').title = isDemo(paper) ? '示例文稿没有原始 PDF，请导入自己的论文体验原版阅读' : '保留论文原有双栏、图片及公式的位置';
-  if (newDocument) {
-    state.originalPage = 1;
-    $('original-pdf-pages').replaceChildren();
-    state.originalPaperId = null;
+  if (changed('translation')) {
+    $('paper-translated').textContent = `已翻译 ${paper.translated_count || 0} 段`;
+    $('paper-translated').hidden = !(paper.translated_count > 0);
   }
-  const notice = isDemo(paper) ? '示例文稿 · 本文为演示阅读排版而创作，内容与译文仅用于体验，不是真实发表的论文。你可以导入自己的论文或文档，开启正式阅读。' : (paper.warnings || []).join(' ');
-  $('paper-notice').hidden = !notice;
-  $('paper-notice').textContent = notice;
   if (fresh) {
+    clearMathObservations();
     state.blocks.clear();
     state.figures.clear();
     state.outlineSignature = '';
@@ -306,16 +334,20 @@ function displayPaper(paper, fresh = false) {
     $('reader-scroll').scrollTop = 0;
     switchSidebarTab('outline');
   }
-  renderParagraphs();
-  renderFigures();
-  renderOutline();
-  renderTranslationStatus();
-  renderFigureStatus();
-  setReadingMode(state.readMode === 'pdf' && (isDemo(paper) || !isPdfPaper(paper)) ? 'bilingual' : state.readMode);
+  if (changed('paragraphs') || changed('figures')) {
+    renderParagraphs();
+    renderFigures();
+  }
+  if (changed('paragraphs') || changed('figures') || changed('outline')) renderOutline();
+  const mode = state.readMode === 'pdf' && (isDemo(paper) || !isPdfPaper(paper)) ? 'bilingual' : state.readMode;
+  if (fresh || newDocument || mode !== state.readMode) setReadingMode(mode);
+  else if (changed('translation')) renderTranslationStatus();
+  if (changed('artwork')) renderFigureStatus();
   updateSummary(paper);
-  localStorage.setItem('folio.lastPaper', paper.id);
+  if (fresh || newDocument) localStorage.setItem('folio.lastPaper', paper.id);
+  state.displaySignatures = signatures;
   schedulePoll();
-  if (fresh) requestAnimationFrame(updateReadingPosition);
+  if (fresh || changed('paragraphs') || changed('figures')) requestAnimationFrame(updateReadingPosition);
 }
 
 function translatedText(paragraph) {
@@ -503,6 +535,7 @@ function renderParagraphs(force = false) {
   }
   if (targetsChanged || state.readingBlocks.length !== state.blocks.size) cacheReadingTargets();
   if (state.search && searchChanged) updateSearchHits(false);
+  pruneMathObservations();
 }
 
 function renderEquationSource(element, paragraph) {
@@ -582,13 +615,16 @@ function figureURL(value) {
 function renderFigures() {
   const figures = Array.isArray(state.paper?.figures) ? state.paper.figures : [];
   const active = new Set();
-  const tails = new Map();
+  const placements = new Map();
+  const captionKeys = new Set((state.paper?.paragraphs || []).map((paragraph) =>
+    `${Number(paragraph.page || 1)}:${(paragraph.text || '').replace(/\s+/g, ' ').trim()}`));
   for (const [index, figure] of figures.entries()) {
     const id = String(figure.id || `figure-${figure.page || 1}-${index}`);
     active.add(id);
     const caption = figure.caption || (isPdfPaper(state.paper) ? `原文插图 · 第 ${figure.page || 1} 页` : '原文插图');
     const url = figureURL(figure.url);
-    const signature = JSON.stringify([caption, url, figure.width, figure.height]);
+    const captionPresent = captionKeys.has(`${Number(figure.page || 1)}:${caption.replace(/\s+/g, ' ').trim()}`);
+    const signature = JSON.stringify([caption, url, figure.width, figure.height, captionPresent]);
     let block = state.figures.get(id);
     if (!block) {
       block = node('figure', 'paper-figure');
@@ -621,8 +657,7 @@ function renderFigures() {
         block.append(link);
       }
       const captionNode = node('figcaption', '', caption);
-      const compactCaption = caption.replace(/\s+/g, ' ').trim();
-      captionNode.hidden = (state.paper.paragraphs || []).some((paragraph) => Number(paragraph.page || 1) === Number(figure.page || 1) && (paragraph.text || '').replace(/\s+/g, ' ').trim() === compactCaption);
+      captionNode.hidden = captionPresent;
       block.append(fallback, captionNode);
     }
     const beforeAnchor = figure.before_paragraph_id == null ? null : state.blocks.get(String(figure.before_paragraph_id));
@@ -632,13 +667,29 @@ function renderFigures() {
       anchor = state.blocks.get(String(preceding[preceding.length - 1]?.id));
     }
     const anchorId = `${beforeAnchor ? 'before' : 'after'}:${anchor?.dataset.paragraphId || 'end'}`;
-    const previous = tails.get(anchorId) || (beforeAnchor ? null : anchor);
-    if (previous) {
-      if (block.previousElementSibling !== previous) previous.after(block);
-    } else if (beforeAnchor) {
-      if (block.nextElementSibling !== beforeAnchor) beforeAnchor.before(block);
-    } else if (block.parentElement !== $('paragraphs')) $('paragraphs').append(block);
-    tails.set(anchorId, block);
+    if (!placements.has(anchorId)) placements.set(anchorId, { beforeAnchor, anchor, blocks: [] });
+    placements.get(anchorId).blocks.push(block);
+  }
+  for (const { beforeAnchor, anchor, blocks } of placements.values()) {
+    if (beforeAnchor) {
+      // Place a shared before-anchor group from its tail. Forward placement
+      // would move its first figure after the others and move them back on
+      // every poll, even when nothing in the paper had changed.
+      let next = beforeAnchor;
+      for (let index = blocks.length - 1; index >= 0; index--) {
+        const block = blocks[index];
+        if (block.nextElementSibling !== next) next.before(block);
+        next = block;
+      }
+    } else {
+      let previous = anchor;
+      for (const block of blocks) {
+        if (previous) {
+          if (block.previousElementSibling !== previous) previous.after(block);
+        } else if (block.parentElement !== $('paragraphs')) $('paragraphs').append(block);
+        previous = block;
+      }
+    }
   }
   for (const [id, block] of state.figures) {
     if (!active.has(id)) { block.remove(); state.figures.delete(id); }
@@ -646,8 +697,9 @@ function renderFigures() {
   let notice = $('figure-load-notice');
   if (state.paper?.figures_error) {
     if (!notice) { notice = node('p', 'figure-error'); notice.id = 'figure-load-notice'; }
-    notice.textContent = isPdfPaper(state.paper) ? '部分插图未能加载，正文仍可阅读。请打开原始 PDF 查看完整图表。' : '部分插图未能加载，正文仍可阅读。可下载源文件查看完整图表。';
-    $('paragraphs').append(notice);
+    const message = isPdfPaper(state.paper) ? '部分插图未能加载，正文仍可阅读。请打开原始 PDF 查看完整图表。' : '部分插图未能加载，正文仍可阅读。可下载源文件查看完整图表。';
+    if (notice.textContent !== message) notice.textContent = message;
+    if (notice.parentElement !== $('paragraphs') || notice.nextElementSibling) $('paragraphs').append(notice);
   } else notice?.remove();
 }
 
@@ -697,7 +749,7 @@ function renderOutline() {
   $('outline-list').replaceChildren(fragment);
   state.outlineItems = [...$('outline-list').querySelectorAll('.outline-item')];
   cacheReadingTargets();
-  updateReadingPosition();
+  requestAnimationFrame(updateReadingPosition);
 }
 
 function renderTranslationStatus() {
