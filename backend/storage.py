@@ -99,7 +99,9 @@ def get_paper(paper_id: str) -> dict | None:
 
 
 def summarize(paper: dict) -> dict:
-    return {k: paper.get(k) for k in ("id", "title", "filename", "page_count", "paragraph_count", "translated_count", "progress", "created_at", "status", "is_demo")}
+    result = {k: paper.get(k) for k in ("id", "title", "filename", "page_count", "paragraph_count", "translated_count", "progress", "created_at", "status", "is_demo")}
+    result["source_format"] = paper.get("source_format", "pdf")
+    return result
 
 
 def list_papers(full=False) -> list[dict]:

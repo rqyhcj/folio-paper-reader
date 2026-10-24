@@ -10,6 +10,7 @@ const state = {
   fontSize: Number(localStorage.getItem('folio.fontSize')) || 18,
   bilingual: true, readMode: 'bilingual', originalPage: 1, originalPaperId: null, originalScrollFrame: null,
   blocks: new Map(), figures: new Map(), outlineSignature: '', scrollFrame: null,
+  readingBlocks: [], outlineItems: [], outlineTargets: [], activeOutline: null,
 };
 
 function node(tag, className, text) {
@@ -54,6 +55,26 @@ function isDemo(paper) {
   return paper?.is_demo || /(?:^demo|示例文稿|folio.demo)/i.test(`${paper?.id || ''} ${paper?.filename || ''}`);
 }
 
+function sourceFormat(paper) {
+  const supplied = String(paper?.source_format || '').toLowerCase();
+  if (['pdf', 'docx', 'markdown', 'txt', 'html'].includes(supplied)) return supplied;
+  const extension = String(paper?.filename || '').toLowerCase().split('.').pop();
+  return ({ __proto__: null, docx: 'docx', md: 'markdown', markdown: 'markdown', txt: 'txt', html: 'html', htm: 'html' })[extension] || 'pdf';
+}
+
+function isPdfPaper(paper) { return sourceFormat(paper) === 'pdf'; }
+
+function documentMeta(paper) {
+  if (isPdfPaper(paper)) return `${paper?.page_count || 0} 页`;
+  return ({ docx: 'DOCX 文档', markdown: 'Markdown 文档', txt: 'TXT 文本', html: 'HTML 文档' })[sourceFormat(paper)];
+}
+
+function importFileError(file) {
+  if (!/\.(?:pdf|docx|md|markdown|txt|html|htm)$/i.test(file?.name || '')) return '支持 PDF、DOCX、Markdown、TXT 和 HTML 文件，请选择其中一种格式。';
+  if (file.size > 50 * 1024 * 1024) return '文件不能超过 50 MB，请选择较小的文件。';
+  return '';
+}
+
 function dateLabel(date) {
   const parsed = new Date(date || Date.now());
   return Number.isNaN(parsed.getTime()) ? '' : parsed.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).replaceAll('/', '.');
@@ -87,7 +108,7 @@ function renderLibrary() {
     const content = node('div', 'library-item-content');
     content.append(node('div', 'library-item-title', paper.title || paper.filename || '未命名论文'));
     const meta = node('div', 'library-item-meta');
-    meta.append(node('span', '', `${paper.page_count || 0} 页`));
+    meta.append(node('span', '', documentMeta(paper)));
     const done = paper.translated_count || 0;
     const total = paper.progress?.total ?? paper.paragraph_count ?? 0;
     const label = paper.status === 'completed' || done >= total && total > 0 ? '已完成' : done > 0 ? `已译 ${Math.min(100, Math.round(done / Math.max(1, total) * 100))}%` : '待翻译';
@@ -132,6 +153,10 @@ function showWelcome() {
   state.blocks.clear();
   state.figures.clear();
   state.outlineSignature = '';
+  state.readingBlocks = [];
+  state.outlineItems = [];
+  state.outlineTargets = [];
+  state.activeOutline = null;
   state.loading = false;
   $('breadcrumb-title').textContent = '开始探索';
   $('outline-list').replaceChildren();
@@ -175,8 +200,8 @@ async function loadPaper(id) {
 
 async function importPaper(file) {
   if (!file || state.importing) return;
-  if (!/\.pdf$/i.test(file.name)) { toast('请选择 PDF 格式的论文文件。', true); return; }
-  if (file.size > 50 * 1024 * 1024) { toast('PDF 不能超过 50 MB，请选择较小的文件。', true); return; }
+  const invalid = importFileError(file);
+  if (invalid) { toast(invalid, true); return; }
   // Import is independent of navigation: keep the current article usable and polling.
   const token = ++state.loadToken;
   // A previously requested article must not replace the newly imported one later.
@@ -189,7 +214,7 @@ async function importPaper(file) {
   for (const id of ['sidebar-import', 'welcome-import']) $(id).disabled = true;
   $('drop-zone').setAttribute('aria-disabled', 'true');
   $('import-status').hidden = false;
-  $('import-status-text').textContent = `正在导入「${file.name}」· 优先提取正文，插图随后在后台整理`;
+  $('import-status-text').textContent = `正在导入「${file.name}」· ${/\.pdf$/i.test(file.name) ? '优先提取正文，插图随后在后台整理' : '正在提取正文、标题与内嵌插图'}`;
   closeSidebar();
   const form = new FormData();
   form.append('file', file);
@@ -241,13 +266,23 @@ function displayPaper(paper, fresh = false) {
   $('paper-title').textContent = paper.title || paper.filename;
   $('paper-date').textContent = dateLabel(paper.created_at);
   $('paper-type').textContent = isDemo(paper) ? 'FOLIO SAMPLE · 示例文稿' : 'YOUR RESEARCH, IN FOCUS';
-  $('paper-pages').textContent = `${paper.page_count || 0} 页`;
+  $('paper-pages').textContent = documentMeta(paper);
   $('paper-paragraphs').textContent = `${paper.paragraph_count || paper.paragraphs?.length || 0} 段`;
   $('paper-translated').textContent = `已翻译 ${paper.translated_count || 0} 段`;
   $('paper-translated').hidden = !(paper.translated_count > 0);
   $('open-original').href = `/api/papers/${encodeURIComponent(paper.id)}/original`;
   $('open-original').hidden = !!isDemo(paper);
+  $('open-original').title = isPdfPaper(paper) ? '查看原始 PDF' : '下载源文件';
+  $('open-original').setAttribute('aria-label', $('open-original').title);
+  if (isPdfPaper(paper)) {
+    $('open-original').removeAttribute('download');
+    $('open-original').target = '_blank';
+  } else {
+    $('open-original').setAttribute('download', paper.filename || '源文件');
+    $('open-original').removeAttribute('target');
+  }
   $('original-pdf-fallback').href = $('open-original').href;
+  $('view-pdf').hidden = !isPdfPaper(paper);
   $('view-pdf').disabled = !!isDemo(paper);
   $('view-pdf').title = isDemo(paper) ? '示例文稿没有原始 PDF，请导入自己的论文体验原版阅读' : '保留论文原有双栏、图片及公式的位置';
   if (newDocument) {
@@ -255,7 +290,7 @@ function displayPaper(paper, fresh = false) {
     $('original-pdf-pages').replaceChildren();
     state.originalPaperId = null;
   }
-  const notice = isDemo(paper) ? '示例文稿 · 本文为演示阅读排版而创作，内容与译文仅用于体验，不是真实发表的论文。你可以导入自己的 PDF，开启正式阅读。' : (paper.warnings || []).join(' ');
+  const notice = isDemo(paper) ? '示例文稿 · 本文为演示阅读排版而创作，内容与译文仅用于体验，不是真实发表的论文。你可以导入自己的论文或文档，开启正式阅读。' : (paper.warnings || []).join(' ');
   $('paper-notice').hidden = !notice;
   $('paper-notice').textContent = notice;
   if (fresh) {
@@ -276,7 +311,7 @@ function displayPaper(paper, fresh = false) {
   renderOutline();
   renderTranslationStatus();
   renderFigureStatus();
-  setReadingMode(state.readMode === 'pdf' && isDemo(paper) ? 'bilingual' : state.readMode);
+  setReadingMode(state.readMode === 'pdf' && (isDemo(paper) || !isPdfPaper(paper)) ? 'bilingual' : state.readMode);
   updateSummary(paper);
   localStorage.setItem('folio.lastPaper', paper.id);
   schedulePoll();
@@ -371,13 +406,14 @@ function renderParagraphs(force = false) {
   const paragraphs = state.paper?.paragraphs || [];
   const figureTextIds = getFigureTextIds();
   let searchChanged = false;
+  let targetsChanged = false;
   for (const paragraph of paragraphs) {
     const id = String(paragraph.id);
     // The figure already contains these labels at their original coordinates.
     // Keep source text and translations in storage; suppress only confirmed duplicates here.
     if (figureTextIds.has(id)) {
       const duplicate = state.blocks.get(id);
-      if (duplicate) { duplicate.remove(); state.blocks.delete(id); searchChanged = true; }
+      if (duplicate) { duplicate.remove(); state.blocks.delete(id); searchChanged = true; targetsChanged = true; }
       continue;
     }
     let block = state.blocks.get(id);
@@ -387,10 +423,13 @@ function renderParagraphs(force = false) {
       block.dataset.paragraphId = id;
       block.dataset.level = paragraph.level || 1;
       block.dataset.page = paragraph.page || 1;
-      block.append(node('span', 'paragraph-page', `P.${paragraph.page || 1}`));
+      const pageLabel = node('span', 'paragraph-page', `P.${paragraph.page || 1}`);
+      pageLabel.hidden = !isPdfPaper(state.paper);
+      block.append(pageLabel);
       block.append(node(paragraph.kind === 'heading' ? 'h2' : 'div', 'paragraph-original'));
       block.append(node('div', 'paragraph-translation'));
       state.blocks.set(id, block);
+      targetsChanged = true;
       $('paragraphs').append(block);
     }
     const text = paragraph.text || '';
@@ -462,6 +501,7 @@ function renderParagraphs(force = false) {
     }
     searchChanged = true;
   }
+  if (targetsChanged || state.readingBlocks.length !== state.blocks.size) cacheReadingTargets();
   if (state.search && searchChanged) updateSearchHits(false);
 }
 
@@ -546,7 +586,7 @@ function renderFigures() {
   for (const [index, figure] of figures.entries()) {
     const id = String(figure.id || `figure-${figure.page || 1}-${index}`);
     active.add(id);
-    const caption = figure.caption || `原文插图 · 第 ${figure.page || 1} 页`;
+    const caption = figure.caption || (isPdfPaper(state.paper) ? `原文插图 · 第 ${figure.page || 1} 页` : '原文插图');
     const url = figureURL(figure.url);
     const signature = JSON.stringify([caption, url, figure.width, figure.height]);
     let block = state.figures.get(id);
@@ -558,7 +598,7 @@ function renderFigures() {
     if (block.dataset.signature !== signature) {
       block.dataset.signature = signature;
       block.replaceChildren();
-      const fallback = node('p', 'figure-error', '这张插图暂时无法显示，可点击工具栏的「查看原始 PDF」阅读。');
+      const fallback = node('p', 'figure-error', isPdfPaper(state.paper) ? '这张插图暂时无法显示，可点击工具栏的「查看原始 PDF」阅读。' : '这张插图暂时无法显示，可下载源文件查看。');
       fallback.hidden = !!url;
       if (url) {
         const link = node('a', 'figure-image-link');
@@ -606,7 +646,7 @@ function renderFigures() {
   let notice = $('figure-load-notice');
   if (state.paper?.figures_error) {
     if (!notice) { notice = node('p', 'figure-error'); notice.id = 'figure-load-notice'; }
-    notice.textContent = '部分插图未能加载，正文仍可阅读。请打开原始 PDF 查看完整图表。';
+    notice.textContent = isPdfPaper(state.paper) ? '部分插图未能加载，正文仍可阅读。请打开原始 PDF 查看完整图表。' : '部分插图未能加载，正文仍可阅读。可下载源文件查看完整图表。';
     $('paragraphs').append(notice);
   } else notice?.remove();
 }
@@ -642,7 +682,7 @@ function renderOutline() {
     const translation = headingTranslations.get(item.dataset.paragraphId);
     if (translation && translation !== section.title) title.append(node('span', 'outline-chinese', translation));
     item.append(title);
-    item.append(node('span', 'outline-page', String(section.page || '')));
+    if (isPdfPaper(state.paper)) item.append(node('span', 'outline-page', String(section.page || '')));
     item.title = section.title;
     item.addEventListener('click', () => {
       if (state.readMode === 'pdf') setOriginalPage(item.dataset.page);
@@ -655,6 +695,8 @@ function renderOutline() {
     fragment.append(item);
   }
   $('outline-list').replaceChildren(fragment);
+  state.outlineItems = [...$('outline-list').querySelectorAll('.outline-item')];
+  cacheReadingTargets();
   updateReadingPosition();
 }
 
@@ -759,7 +801,7 @@ async function retryParagraph(id, button) {
 
 async function deletePaper(paper) {
   const dialog = $('confirm-dialog');
-  $('confirm-description').textContent = `「${paper.title || paper.filename}」及已保存的译文将被移除，源 PDF 文件不受影响。`;
+  $('confirm-description').textContent = `「${paper.title || paper.filename}」及已保存的译文将被移除，电脑中的源文件不受影响。`;
   dialog.returnValue = 'cancel';
   dialog.showModal();
   const confirmed = await new Promise((resolve) => dialog.addEventListener('close', () => resolve(dialog.returnValue === 'confirm'), { once: true }));
@@ -773,35 +815,71 @@ async function deletePaper(paper) {
   } catch (error) { toast(error.message, true); }
 }
 
+// Keep only element references, not pixel offsets: translations, font changes,
+// and lazily loaded figures can all change a paragraph's height while reading.
+function cacheReadingTargets() {
+  state.readingBlocks = [...state.blocks.values()];
+  const order = new Map(state.readingBlocks.map((block, index) => [block, index]));
+  state.outlineTargets = state.outlineItems.map((item) => ({
+    item, block: state.blocks.get(item.dataset.paragraphId),
+  })).filter(({ block }) => order.has(block)).sort((a, b) => order.get(a.block) - order.get(b.block));
+}
+
+// One layout read per binary-search step instead of scanning the whole paper
+// every animation frame. Read live geometry so async changes never stale it.
+function lastPassedElement(items, top, elementFor = (item) => item) {
+  let low = 0;
+  let high = items.length - 1;
+  let found = null;
+  while (low <= high) {
+    const middle = (low + high) >>> 1;
+    const item = items[middle];
+    if (elementFor(item).getBoundingClientRect().top <= top) {
+      found = item;
+      low = middle + 1;
+    } else high = middle - 1;
+  }
+  return found;
+}
+
+function setReadingText(element, value) {
+  if (element.textContent !== value) element.textContent = value;
+}
+
+function activateOutline(current) {
+  if (state.activeOutline === current) return;
+  state.activeOutline?.classList.remove('active');
+  current?.classList.add('active');
+  state.activeOutline = current;
+}
+
 function updateReadingPosition() {
   if (!state.paper || $('reader-view').hidden) return;
   if (state.readMode === 'pdf') {
     const page = state.originalPage;
-    const items = [...$('outline-list').querySelectorAll('.outline-item')];
+    const items = state.outlineItems;
     let current = null;
     for (const item of items) if (Number(item.dataset.page) <= page) current = item;
-    for (const item of items) item.classList.toggle('active', item === current);
-    $('reading-location').textContent = `原版 PDF · 定位到第 ${page} 页 / 共 ${state.paper.page_count || 1} 页`;
-    $('read-progress').textContent = '';
+    activateOutline(current);
+    setReadingText($('reading-location'), `原版 PDF · 定位到第 ${page} 页 / 共 ${state.paper.page_count || 1} 页`);
+    setReadingText($('read-progress'), '');
     return;
   }
   const scroll = $('reader-scroll');
   const max = scroll.scrollHeight - scroll.clientHeight;
-  $('read-progress').textContent = `${max > 0 ? Math.min(100, Math.round(scroll.scrollTop / max * 100)) : 100}%`;
+  const progress = `${max > 0 ? Math.min(100, Math.round(scroll.scrollTop / max * 100)) : 100}%`;
   const top = scroll.getBoundingClientRect().top + 100;
-  const outlineItems = [...$('outline-list').querySelectorAll('.outline-item')];
-  let current = outlineItems[0];
-  for (const item of outlineItems) {
-    const block = state.blocks.get(item.dataset.paragraphId);
-    if (block && block.getBoundingClientRect().top <= top) current = item;
-  }
-  for (const item of outlineItems) item.classList.toggle('active', item === current);
-  let page = 1;
-  for (const block of state.blocks.values()) {
-    if (block.getBoundingClientRect().top <= top) page = Number(block.dataset.page) || page;
-    else break;
-  }
-  $('reading-location').textContent = current ? `${current.querySelector('.outline-english').textContent} · 第 ${page} 页` : `第 ${page} 页 / 共 ${state.paper.page_count || 1} 页`;
+  const current = lastPassedElement(state.outlineTargets, top, (target) => target.block)?.item || state.outlineItems[0] || null;
+  const block = lastPassedElement(state.readingBlocks, top);
+  const page = Number(block?.dataset.page) || 1;
+  const title = current?.querySelector('.outline-english').textContent;
+  const location = isPdfPaper(state.paper)
+    ? title ? `${title} · 第 ${page} 页` : `第 ${page} 页 / 共 ${state.paper.page_count || 1} 页`
+    : title || '正在阅读';
+  // All geometry reads precede DOM writes to avoid a forced layout in this frame.
+  activateOutline(current);
+  setReadingText($('read-progress'), progress);
+  setReadingText($('reading-location'), location);
 }
 
 function setFontSize(size) {
@@ -819,6 +897,7 @@ function setBilingual(value) {
 }
 
 function setReadingMode(mode) {
+  if (mode === 'pdf' && (!state.paper || isDemo(state.paper) || !isPdfPaper(state.paper))) mode = 'bilingual';
   const modeChanged = state.readMode !== mode;
   const pdf = mode === 'pdf';
   state.readMode = mode;
@@ -844,7 +923,7 @@ function setReadingMode(mode) {
 }
 
 function renderOriginalPages() {
-  if (!state.paper || isDemo(state.paper) || state.originalPaperId === state.paper.id) return false;
+  if (!state.paper || !isPdfPaper(state.paper) || isDemo(state.paper) || state.originalPaperId === state.paper.id) return false;
   const fragment = document.createDocumentFragment();
   const paperId = state.paper.id;
   for (let page = 1; page <= (Number(state.paper.page_count) || 1); page++) {
@@ -898,11 +977,9 @@ function updateOriginalPageFromScroll() {
   if (state.readMode !== 'pdf' || !state.paper) return;
   const region = $('original-pdf-pages');
   const top = region.getBoundingClientRect().top + 60;
-  let page = 1;
-  for (const element of region.children) {
-    if (element.getBoundingClientRect().top <= top) page = Number(element.dataset.page) || page;
-    else break;
-  }
+  const element = lastPassedElement(region.children, top);
+  const page = Number(element?.dataset.page) || 1;
+  if (state.originalPage === page) return;
   state.originalPage = page;
   if (document.activeElement !== $('original-page')) syncOriginalPageControls();
   updateReadingPosition();

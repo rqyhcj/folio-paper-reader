@@ -18,7 +18,7 @@ router = APIRouter()
 
 def _paper(paper_id: str) -> dict:
     paper = db.get_paper(paper_id)
-    if paper is None or paper.get("is_demo"):
+    if paper is None or paper.get("is_demo") or paper.get("source_format", "pdf") != "pdf":
         raise HTTPException(404, "未找到可查看的原始 PDF。")
     return paper
 

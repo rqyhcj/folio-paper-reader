@@ -22,3 +22,7 @@ jobs:
         run: node tests/test_model_picker.cjs
       - name: Check figure labels and outline
         run: node tests/test_outline_labels.cjs
+      - name: Check long-document scrolling
+        run: node tests/test_reading_position.cjs
+      - name: Check multi-format imports
+        run: node tests/test_import_formats.cjs

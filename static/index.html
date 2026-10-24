@@ -15,7 +15,7 @@
   <link rel="stylesheet" href="/reading.css">
   <script defer src="/vendor/katex/katex.min.js"></script>
   <script defer id="katex-auto-render-script" src="/vendor/katex/contrib/auto-render.min.js"></script>
-  <script type="module" src="/app.js?v=inline-formulas-5"></script>
+  <script type="module" src="/app.js?v=documents-scroll-6"></script>
 </head>
 <body>
   <svg class="icon-defs" aria-hidden="true"><defs>
@@ -45,10 +45,10 @@
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
       <a class="brand" href="#" id="brand-home" aria-label="纸间首页"><span class="brand-mark"><span></span><span></span><span></span></span><strong>纸间<span>FOLIO</span></strong></a>
-      <button class="button primary import-button" id="sidebar-import"><svg><use href="#i-plus"/></svg>导入论文 <span class="keyboard-hint">PDF</span></button>
+      <button class="button primary import-button" id="sidebar-import"><svg><use href="#i-plus"/></svg>导入文档 <span class="keyboard-hint">多格式</span></button>
       <div class="sidebar-tabs" role="tablist" aria-label="侧边栏"><button id="tab-library" role="tab" aria-selected="true" class="active"><svg><use href="#i-book"/></svg>文献库<span id="library-count">0</span></button><button id="tab-outline" role="tab" aria-selected="false"><svg><use href="#i-menu"/></svg>目录</button></div>
       <div class="sidebar-scroll">
-        <div id="library-panel" role="tabpanel"><div class="sidebar-label">我的论文</div><div id="paper-list"></div><div id="library-empty" class="library-empty"><svg><use href="#i-file"/></svg><p>把值得读的论文<br>留在这里</p></div></div>
+        <div id="library-panel" role="tabpanel"><div class="sidebar-label">我的文献</div><div id="paper-list"></div><div id="library-empty" class="library-empty"><svg><use href="#i-file"/></svg><p>把值得读的论文与笔记<br>留在这里</p></div></div>
         <div id="outline-panel" role="tabpanel" hidden><div class="sidebar-label">文章目录 <span id="outline-count"></span></div><div id="outline-list"></div><div id="outline-empty" class="sidebar-empty">导入一篇论文，<br>开始有条理地阅读。</div></div>
       </div>
       <div class="sidebar-bottom"><button class="api-status" id="open-settings"><span class="status-dot" id="api-dot"></span><span><strong id="api-status-label">连接翻译模型</strong><small id="api-status-detail">配置你的 API</small></span><svg><use href="#i-settings"/></svg></button><a class="source-link" href="https://github.com/rqyhcj/folio-paper-reader" target="_blank" rel="noopener">AGPL-3.0 · 项目源码 ↗</a><div class="sidebar-footnote">留一点时间，读深一点。<span>✧</span></div></div>
@@ -63,9 +63,9 @@
       <main id="main-content">
         <section id="welcome-view" class="welcome-view">
           <div class="welcome-intro"><div class="eyebrow"><span></span> A QUIETER SPACE FOR BIG IDEAS</div><h1>跨过语言，<br>走近<span>每一个想法。</span></h1><p>从一篇论文开始。让原文与译文相伴，<br class="desktop-break">让阅读的节奏，回到你手中。</p></div>
-          <div class="import-card" id="drop-zone" tabindex="0" role="button" aria-label="点击或拖放 PDF 导入论文">
-            <div class="file-art"><div class="file-art-back"></div><div class="file-art-front"><svg><use href="#i-file"/></svg><span>PDF</span></div><span class="file-art-spark">✧</span></div>
-            <h2>你的下一篇，读懂更多。</h2><p>拖入 PDF 文件，或点击下方按钮选择论文</p><button class="button primary" id="welcome-import"><svg><use href="#i-upload"/></svg>选择 PDF 论文<svg class="button-arrow"><use href="#i-arrow"/></svg></button><small>本地保存 · 按段翻译 · 双语对照</small>
+          <div class="import-card" id="drop-zone" tabindex="0" role="button" aria-label="点击或拖放 PDF、DOCX、Markdown、TXT 或 HTML 导入文档">
+            <div class="file-art"><div class="file-art-back"></div><div class="file-art-front"><svg><use href="#i-file"/></svg><span>FILE</span></div><span class="file-art-spark">✧</span></div>
+            <h2>你的下一篇，读懂更多。</h2><p>拖入论文或笔记 · PDF / DOCX / Markdown / TXT / HTML</p><button class="button primary" id="welcome-import"><svg><use href="#i-upload"/></svg>选择文档<svg class="button-arrow"><use href="#i-arrow"/></svg></button><small>本地保存 · 按段翻译 · 双语对照</small>
           </div>
           <div class="welcome-details"><span><svg><use href="#i-translate"/></svg>英文一段，中文一段</span><i></i><span><svg><use href="#i-menu"/></svg>目录导航，直达重点</span><i></i><span><svg><use href="#i-shield"/></svg>自由配置大模型 API</span></div>
           <div class="demo-invitation"><div><span class="mini-label">先感受一下</span><p>让复杂的知识，变得触手可及。</p></div><button id="load-demo">打开示例文稿<svg><use href="#i-arrow"/></svg></button></div>
@@ -85,7 +85,7 @@
     </div>
   </div>
 
-  <input type="file" id="pdf-input" accept=".pdf,application/pdf" hidden>
+  <input type="file" id="pdf-input" accept=".pdf,.docx,.md,.markdown,.txt,.html,.htm,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown,text/plain,text/html" aria-label="选择 PDF、DOCX、Markdown、TXT 或 HTML 文档" hidden>
   <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title" aria-describedby="settings-description">
     <form id="settings-form">
       <div class="dialog-header"><div><span class="mini-label">YOUR MODEL, YOUR CHOICE</span><h2 id="settings-title">连接你的翻译模型</h2></div><button type="button" class="icon-button" id="settings-close" aria-label="关闭设置"><svg><use href="#i-close"/></svg></button></div>
