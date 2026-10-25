@@ -49,7 +49,7 @@ def main():
         if not python.exists():
             print("正在准备纸间的独立运行环境，首次启动需要下载依赖…", flush=True)
             venv.create(ROOT / ".venv", with_pip=True)
-        result = subprocess.run([str(python), "-c", "import fastapi, uvicorn, fitz, httpx, multipart"], capture_output=True)
+        result = subprocess.run([str(python), "-c", "import fastapi, uvicorn, fitz, httpx, multipart, ziamath"], capture_output=True)
         if result.returncode:
             subprocess.check_call([str(python), "-m", "pip", "install", "-r", str(ROOT / "requirements.txt")])
         raise SystemExit(subprocess.call([str(python), str(ROOT / "launcher.py")]))

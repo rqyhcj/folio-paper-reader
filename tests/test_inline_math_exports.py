@@ -101,7 +101,8 @@ def test_all_exports_replace_protected_tokens_and_keep_source_pieces(inline_clie
     with PDF_LOCK, fitz.open(stream=pdf.content, filetype="pdf") as document:
         text = "".join(page.get_text() for page in document)
         assert "FOLIO_MATH" not in text and "原式1" in text
-        assert "alpha_t" in text
+        assert "alpha_t" not in text, "LaTeX must be typeset, not printed as source"
+        assert sum(len(page.get_drawings()) for page in document) >= 3
         assert sum(len(page.get_image_info()) for page in document) == 3
     markdown = client.get("/api/papers/inline-paper/export?format=markdown")
     assert "FOLIO_MATH" not in markdown.text

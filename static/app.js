@@ -266,23 +266,58 @@ async function loadDemo() {
   }
 }
 
+function captureReparsePosition() {
+  if (state.readMode === 'pdf') return null;
+  const scroll = $('reader-scroll');
+  const top = scroll.getBoundingClientRect().top;
+  const blocks = state.readingBlocks?.length ? state.readingBlocks : [...(state.blocks?.values() || [])];
+  const block = lastPassedElement(blocks, top + 100) || blocks[0];
+  const paragraph = state.paper?.paragraphs?.find((item) => String(item.id) === block?.dataset.paragraphId);
+  return { page: paragraph?.page || Number(block?.dataset.page) || 1, bbox: paragraph?.bbox,
+    offset: block ? block.getBoundingClientRect().top - top : 0, scrollTop: scroll.scrollTop };
+}
+
+function restoreReparsePosition(position) {
+  if (!position || state.readMode === 'pdf') return;
+  const candidates = (state.paper?.paragraphs || []).filter((item) => Number(item.page || 1) === Number(position.page));
+  const target = candidates.reduce((closest, paragraph) => {
+    if (!state.blocks.has(String(paragraph.id))) return closest;
+    const score = (item) => {
+      if (!position.bbox || !item?.bbox) return item ? 0 : Infinity;
+      const [x0, y0, x1] = item.bbox;
+      const [oldX0, oldY0, oldX1] = position.bbox;
+      return Math.abs((x0 + x1 - oldX0 - oldX1) / 2) * 2 + Math.abs(y0 - oldY0);
+    };
+    return score(paragraph) < score(closest) ? paragraph : closest;
+  }, null);
+  const scroll = $('reader-scroll');
+  const block = target && state.blocks.get(String(target.id));
+  const top = block ? scroll.scrollTop + block.getBoundingClientRect().top
+    - scroll.getBoundingClientRect().top - position.offset : position.scrollTop;
+  // Do not animate through a document whose paragraph IDs have just changed.
+  scroll.scrollTo({ top: Math.max(0, top), behavior: 'instant' });
+  updateReadingPosition();
+}
+
 function displayPaper(paper, fresh = false) {
   const newDocument = state.paper?.id !== paper.id;
   const wasDemo = state.paper?.id === paper.id && state.paper?.is_demo;
+  const reparsed = !fresh && !newDocument && Number(paper.parse_version || 0) > Number(state.paper?.parse_version || 0);
+  const readingPosition = reparsed ? captureReparsePosition() : null;
   state.paper = paper;
   if (wasDemo) state.paper.is_demo = true;
   const signatures = {
     metadata: JSON.stringify([paper.id, paper.title, paper.filename, paper.created_at,
-      paper.page_count, paper.paragraph_count, paper.source_format, paper.is_demo, paper.warnings]),
+      paper.page_count, paper.paragraph_count, paper.source_format, paper.is_demo, paper.warnings, paper.parse_status, paper.parse_error]),
     paragraphs: JSON.stringify([paper.id, paper.parse_version, paper.paragraphs, state.search]),
     figures: JSON.stringify([paper.id, paper.figures, paper.figures_error]),
     outline: JSON.stringify([paper.id, paper.outline]),
     translation: JSON.stringify([paper.id, paper.status, paper.error, paper.progress,
-      paper.paragraph_count, paper.translated_count, state.bilingual]),
+      paper.paragraph_count, paper.translated_count, state.bilingual, paper.parse_status, paper.parse_error]),
     artwork: JSON.stringify([paper.id, paper.figure_status, paper.figure_progress, paper.page_count]),
   };
   const previous = state.displaySignatures || {};
-  const changed = (key) => fresh || newDocument || signatures[key] !== previous[key];
+  const changed = (key) => fresh || newDocument || reparsed || signatures[key] !== previous[key];
   state.loading = false;
   if (fresh || newDocument || $('reader-view').hidden) showView('reader');
   if (changed('metadata')) {
@@ -320,19 +355,25 @@ function displayPaper(paper, fresh = false) {
     $('paper-translated').textContent = `已翻译 ${paper.translated_count || 0} 段`;
     $('paper-translated').hidden = !(paper.translated_count > 0);
   }
-  if (fresh) {
+  if (fresh || reparsed) {
     clearMathObservations();
     state.blocks.clear();
     state.figures.clear();
     state.outlineSignature = '';
-    state.search = '';
+    state.readingBlocks = [];
+    state.outlineItems = [];
+    state.outlineTargets = [];
+    state.activeOutline = null;
     state.hits = [];
     state.hitIndex = -1;
-    $('document-search').value = '';
-    $('search-bar').hidden = true;
     $('paragraphs').replaceChildren();
-    $('reader-scroll').scrollTop = 0;
-    switchSidebarTab('outline');
+    if (fresh) {
+      state.search = '';
+      $('document-search').value = '';
+      $('search-bar').hidden = true;
+      $('reader-scroll').scrollTop = 0;
+      switchSidebarTab('outline');
+    }
   }
   if (changed('paragraphs') || changed('figures')) {
     renderParagraphs();
@@ -347,7 +388,10 @@ function displayPaper(paper, fresh = false) {
   if (fresh || newDocument) localStorage.setItem('folio.lastPaper', paper.id);
   state.displaySignatures = signatures;
   schedulePoll();
-  if (fresh || changed('paragraphs') || changed('figures')) requestAnimationFrame(updateReadingPosition);
+  if (reparsed && readingPosition) requestAnimationFrame(() => {
+    if (state.paper?.id === paper.id && state.paper?.parse_version === paper.parse_version) restoreReparsePosition(readingPosition);
+  });
+  else if (fresh || changed('paragraphs') || changed('figures')) requestAnimationFrame(updateReadingPosition);
 }
 
 function translatedText(paragraph) {
@@ -760,23 +804,34 @@ function renderTranslationStatus() {
   const done = paper.progress?.done ?? paper.translated_count ?? paragraphs.filter((p) => !!p.translation).length;
   const failed = paper.progress?.failed ?? paragraphs.filter((p) => !!p.error && !p.translation).length;
   const noTextToTranslate = total === 0 && paragraphs.length > 0;
+  const updating = ['updating', 'pending'].includes(paper.parse_status);
+  const updateFailed = paper.parse_status === 'error';
   const running = paper.status === 'translating';
   const paused = paper.status === 'paused';
   const completed = paper.status === 'completed' || done >= total && total > 0;
   const banner = $('translation-banner');
-  banner.hidden = !running && !paused && !failed && !paper.error && !done;
-  banner.classList.toggle('running', running);
-  banner.classList.toggle('has-error', !!failed || paper.status === 'error');
-  $('translation-status').textContent = running ? '翻译进行中' : completed ? '双语文稿已就绪' : paused ? '翻译已暂停' : failed || paper.error ? '部分内容需要重试' : '已保留当前译文';
-  $('translation-detail').textContent = `${done} / ${total} 段${failed ? ` · ${failed} 段未成功` : running ? ' · 可随时阅读已完成的部分' : ''}`;
-  if (paper.error) $('translation-detail').title = paper.error;
+  banner.hidden = !updating && !updateFailed && !running && !paused && !failed && !paper.error && !done;
+  banner.classList.toggle('running', running || updating);
+  banner.classList.toggle('has-error', updateFailed || !!failed || paper.status === 'error');
+  $('translation-status').textContent = updating && running ? '排版更新等待翻译暂停' : updating ? '正在整理行号与公式' : updateFailed ? '本地排版更新暂未完成' : running ? '翻译进行中' : completed ? '双语文稿已就绪' : paused ? '翻译已暂停' : failed || paper.error ? '部分内容需要重试' : '已保留当前译文';
+  $('translation-detail').textContent = updating && running ? '可暂停翻译后更新排版 · 已保存译文保留，可继续阅读' : updating ? '本地更新中 · 已保存译文保留，可继续阅读' : updateFailed ? '已保留原文与全部译文，可继续阅读或打开原版核对' : `${done} / ${total} 段${failed ? ` · ${failed} 段未成功` : running ? ' · 可随时阅读已完成的部分' : ''}`;
+  $('translation-detail').title = paper.parse_error || paper.error || '';
   $('translation-progress').style.width = `${Math.min(100, total ? done / total * 100 : 0)}%`;
-  $('retry-failed').hidden = !failed || running;
+  $('retry-failed').hidden = !failed || running || updating;
   const button = $('translate-button');
-  button.innerHTML = `${icon(running ? 'pause' : completed || noTextToTranslate ? 'check' : 'spark')}<span>${running ? '暂停翻译' : noTextToTranslate ? '无需翻译' : completed ? '翻译完成' : paused || done ? '继续翻译' : '全文翻译'}</span>`;
-  button.disabled = noTextToTranslate || completed && !failed;
-  button.title = running ? '暂停后会保留已完成的译文' : noTextToTranslate ? '当前文稿没有需要翻译的正文段落' : completed ? '所有正文段落均已完成翻译' : '用当前配置的模型逐段翻译';
-  $('reader-help').hidden = noTextToTranslate || running || done > 0 || !!paper.error || !!failed || !state.bilingual;
+  button.innerHTML = `${icon(running ? 'pause' : completed || noTextToTranslate ? 'check' : 'spark')}<span>${running ? '暂停翻译' : updating ? '更新排版中' : noTextToTranslate ? '无需翻译' : completed ? '翻译完成' : paused || done ? '继续翻译' : '全文翻译'}</span>`;
+  button.disabled = updating ? !running : noTextToTranslate || completed && !failed;
+  button.title = running ? '暂停后会保留已完成的译文' : updating ? '本地排版更新完成后即可继续翻译，已保存译文会保留' : noTextToTranslate ? '当前文稿没有需要翻译的正文段落' : completed ? '所有正文段落均已完成翻译' : '用当前配置的模型逐段翻译';
+  $('reader-help').hidden = updating || noTextToTranslate || running || done > 0 || !!paper.error || !!failed || !state.bilingual;
+  for (const retry of document.querySelectorAll('#paragraphs .paragraph-translation button')) {
+    if (updating && !retry.disabled) {
+      retry.dataset.parseBlocked = 'true';
+      retry.disabled = true;
+    } else if (!updating && retry.dataset.parseBlocked) {
+      delete retry.dataset.parseBlocked;
+      retry.disabled = false;
+    }
+  }
 }
 
 function renderFigureStatus() {
@@ -793,7 +848,8 @@ function renderFigureStatus() {
 
 function schedulePoll() {
   clearTimeout(state.poll);
-  if (state.paper?.status !== 'translating' && !['extracting', 'pending'].includes(state.paper?.figure_status)) return;
+  if (state.paper?.status !== 'translating' && !['extracting', 'pending'].includes(state.paper?.figure_status)
+      && !['updating', 'pending'].includes(state.paper?.parse_status)) return;
   const id = state.paper.id;
   state.poll = setTimeout(async () => {
     try {
@@ -815,6 +871,7 @@ async function translatePaper(retry = false) {
   if (!state.paper) return;
   const id = state.paper.id;
   const running = state.paper.status === 'translating' && !retry;
+  if (['updating', 'pending'].includes(state.paper.parse_status) && !running) return;
   if (!running && !isModelConfigured()) {
     openSettings();
     settingsMessage('请先选择服务商，自行填写模型和连接信息并保存，然后开始翻译。');
@@ -836,6 +893,7 @@ async function translatePaper(retry = false) {
 }
 
 async function retryParagraph(id, button) {
+  if (['updating', 'pending'].includes(state.paper?.parse_status)) return;
   if (!isModelConfigured()) { openSettings(); return; }
   const paperId = state.paper.id;
   button.disabled = true;

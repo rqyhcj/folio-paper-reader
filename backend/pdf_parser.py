@@ -16,13 +16,13 @@ from pathlib import PureWindowsPath
 import fitz
 
 from .pdf_runtime import synchronized_pdf
-from .math_recovery import _span_text, expand_equation_source, keep_span_characters, recover_paragraph
+from .math_recovery import _span_text, annotate_page_math, expand_equation_source, keep_span_characters, recover_paragraph
 
 
 MAX_PAGES = 500
 MAX_TEXT_CHARS = 3_000_000
 MAX_PARAGRAPH_CHARS = 4500
-PARSE_VERSION = 5
+PARSE_VERSION = 6
 
 
 class PDFExtractionError(ValueError):
@@ -66,7 +66,7 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text.translate(_LIGATURES)).strip()
 
 
-def _read_lines(page: fitz.Page, page_number: int) -> list[_Line]:
+def _read_lines(page: fitz.Page, page_number: int, removed_line_numbers: list[dict] | None = None) -> list[_Line]:
     lines = []
     flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_IMAGES
     for block_number, block in enumerate(page.get_text("rawdict", sort=False, flags=flags)["blocks"]):
@@ -119,7 +119,144 @@ def _read_lines(page: fitz.Page, page_number: int) -> list[_Line]:
                 math_ratio=math_chars / max(1, total_chars),
                 spans=spans,
             ))
+    lines = _remove_review_line_numbers(lines, removed_line_numbers)
+    annotate_page_math(page, lines)
     return _attach_extension_fragments(_merge_line_fragments(lines))
+
+
+def _remove_review_line_numbers(lines: list[_Line], removed: list[dict] | None = None) -> list[_Line]:
+    """Remove proven review-number rails before their digits join body/math rows.
+
+    A bare integer is never enough evidence: markers must form a consecutive
+    vertical sequence at an outer margin, with ordinary prose beside that rail.
+    This preserves isolated numbers, equation labels, years and table values.
+    """
+    if not lines:
+        return lines
+    rails: list[list[tuple[_Line, dict, int]]] = []
+    prose = []
+    for line in lines:
+        nonnumeric = [span for span in line.spans
+                      if _clean(span.get("text", "")) and not re.fullmatch(r"\d+", _clean(span.get("text", "")))]
+        if nonnumeric and len(_clean("".join(span.get("text", "") for span in nonnumeric))) >= 16:
+            prose.append((line.baseline, min(span["bbox"][0] for span in nonnumeric),
+                          max(span["bbox"][2] for span in nonnumeric), line.size))
+        for span in line.spans:
+            text = _clean(span.get("text", ""))
+            if not re.fullmatch(r"\d{1,4}", text):
+                continue
+            value = int(text)
+            # Year labels in charts/lists are content even when they happen to
+            # increase consecutively at a page edge.
+            if 1800 <= value <= 2199:
+                continue
+            x0, y0, x1, y1 = span["bbox"]
+            size = float(span.get("size", line.size))
+            side = "left" if x1 <= line.width * .12 else "right" if x0 >= line.width * .88 else None
+            if side is None or x1 - x0 > size * 3.8:
+                continue
+            signature = (side, span.get("font", ""), round(size, 1), span.get("color", 0))
+            rail = next((items for items in rails if items[0][1]["_review_signature"] == signature
+                         and abs(items[0][1]["bbox"][0] - x0) <= max(1.5, size * .2)), None)
+            span["_review_signature"] = signature
+            if rail is None:
+                rail = []
+                rails.append(rail)
+            rail.append((line, span, value))
+    # A narrow numeric table column can itself sit near the page edge.
+    # Proven review rails must still be outside the recurring prose boundary.
+    left_edges = Counter(round(x0 / 3) * 3 for _, x0, _, _ in prose)
+    body_left = min((edge for edge, count in left_edges.items() if count >= 3), default=None)
+    if body_left is not None:
+        rails = [rail for rail in rails if rail[0][1]["_review_signature"][0] != "left"
+                 or rail[0][1]["bbox"][2] < body_left - float(rail[0][1].get("size", rail[0][0].size)) * .65]
+    remove_ids = set()
+    runs = []
+    for rail in rails:
+        rail.sort(key=lambda item: (float(item[1].get("origin", (0, item[1]["bbox"][3]))[1]), item[2]))
+        run = []
+        for item in rail:
+            if run and not 1 <= item[2] - run[-1][2] <= 3:
+                runs.append(run)
+                run = []
+            run.append(item)
+        if run:
+            runs.append(run)
+    confirmed = []
+    for rail in runs:
+        if len(rail) < 5:
+            continue
+        values = [item[2] for item in rail]
+        steps = [right - left for left, right in zip(values, values[1:])]
+        consecutive = sum(step == 1 for step in steps)
+        ordered = sum(1 <= step <= 3 for step in steps)
+        top = rail[0][1]["bbox"][1]
+        bottom = rail[-1][1]["bbox"][3]
+        size = float(rail[0][1].get("size", rail[0][0].size))
+        if consecutive < 3 or ordered < len(steps) * .8 or bottom - top < size * 5:
+            continue
+        adjacent = 0
+        for line, span, _ in rail:
+            x0, _, x1, _ = span["bbox"]
+            baseline = float(span.get("origin", (0, line.baseline))[1])
+            left = span["_review_signature"][0] == "left"
+            adjacent += any(size <= body_size * .94
+                            and abs(base - baseline) <= max(size, body_size) * .6
+                            and (body_x0 >= x1 + size * .65 if left else body_x1 <= x0 - size * .65)
+                            and (body_x0 - x1 if left else x0 - body_x1) <= line.width * .30
+                            for base, body_x0, body_x1, body_size in prose)
+        if adjacent < max(3, len(rail) * .45):
+            continue
+        confirmed.append(rail)
+    # A final column can contain only one or two review lines. Accept its
+    # short rail only when it directly continues the proven opposite rail,
+    # uses the same marker typography and also sits beside actual body text.
+    accepted = list(confirmed)
+    for rail in runs:
+        if len(rail) >= 5 or not rail:
+            continue
+        signature = rail[0][1]["_review_signature"]
+        if not any(signature[0] != other[0][1]["_review_signature"][0]
+                   and signature[1:] == other[0][1]["_review_signature"][1:]
+                   and (1 <= other[0][2] - rail[-1][2] <= 3
+                        or 1 <= rail[0][2] - other[-1][2] <= 3) for other in confirmed):
+            continue
+        adjacent = 0
+        for line, span, _ in rail:
+            x0, _, x1, _ = span["bbox"]
+            baseline = float(span.get("origin", (0, line.baseline))[1])
+            size = float(span.get("size", line.size))
+            left = signature[0] == "left"
+            adjacent += any(size <= body_size * .94
+                            and abs(base - baseline) <= max(size, body_size) * .6
+                            and (body_x0 >= x1 + size * .65 if left else body_x1 <= x0 - size * .65)
+                            for base, body_x0, body_x1, body_size in prose)
+        if adjacent >= max(1, len(rail) * .5):
+            accepted.append(rail)
+    for rail in accepted:
+        for line, span, _ in rail:
+            remove_ids.add(id(span))
+            if removed is not None:
+                removed.append({"page": line.page, "text": _clean(span["text"]),
+                                "bbox": [round(float(value), 3) for value in span["bbox"]]})
+    result = []
+    for line in lines:
+        spans = [span for span in line.spans if id(span) not in remove_ids]
+        for span in line.spans:
+            span.pop("_review_signature", None)
+        if len(spans) == len(line.spans):
+            result.append(line)
+        elif spans:
+            # A PDF text line can include its margin marker in the same run.
+            # Recompute the source box so formula screenshots exclude that rail.
+            line.spans = spans
+            line.text = _clean(_span_text(spans))
+            line.x0 = min(span["bbox"][0] for span in spans)
+            line.y0 = min(span["bbox"][1] for span in spans)
+            line.x1 = max(span["bbox"][2] for span in spans)
+            line.y1 = max(span["bbox"][3] for span in spans)
+            result.append(line)
+    return result
 
 
 def _merge_line_fragments(lines: list[_Line]) -> list[_Line]:
@@ -794,10 +931,11 @@ def extract_pdf(data: bytes, filename: str) -> dict:
         if page_count > MAX_PAGES:
             raise PDFExtractionError(f"PDF 共 {page_count} 页，超出 {MAX_PAGES} 页限制，请拆分后导入。")
         pages = []
+        removed_line_numbers = []
         text_chars = 0
         empty_pages = []
         for index, page in enumerate(document):
-            lines = _read_lines(page, index + 1)
+            lines = _read_lines(page, index + 1, removed_line_numbers)
             text_chars += sum(len(line.text) for line in lines)
             if text_chars > MAX_TEXT_CHARS:
                 raise PDFExtractionError("PDF 文本内容过长，请按章节拆分后导入。")
@@ -826,7 +964,7 @@ def extract_pdf(data: bytes, filename: str) -> dict:
         title = _title((document.metadata or {}).get("title"), pages, body_size, filename)
         outline = _build_outline(paragraphs, document.get_toc(simple=True))
         return {"title": title, "page_count": page_count, "paragraphs": paragraphs, "parse_version": PARSE_VERSION,
-                "outline": outline, "warnings": warnings}
+                "outline": outline, "warnings": warnings, "removed_line_numbers": removed_line_numbers}
     except PDFExtractionError:
         raise
     except Exception as exc:

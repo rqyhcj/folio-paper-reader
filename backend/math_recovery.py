@@ -1,20 +1,20 @@
 """Conservative TeX recovery from PDF character positions, never from prose guesses.
 
-Only single-baseline expressions and clearly offset, smaller scripts are
-reconstructed. Ambiguous font encodings, stacked fractions, overlapping glyphs
-and multi-line layouts fall back to their original PDF region.
+Characters, script positions and explicit vector rules are reconstructed only
+when their structure is unambiguous. Unsupported encodings or layouts retain
+their original PDF region rather than becoming a plausible, false equation.
 """
 
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 import unicodedata
 
 
 _MATH_FONT = re.compile(r"(?:CMMI|CMMIB|CMSY|CMEX|MSAM|MSBM|Math|Symbol)", re.I)
-_CM_FONT = re.compile(r"(?:^|\+)(?:CM(?:R|BX|TI|MI|MIB|SY)|MSBM)\d", re.I)
+_CM_FONT = re.compile(r"(?:^|\+)(?:CM(?:R|BX|TI|MI|MIB|SY|SS)|MSBM)\d", re.I)
 _NUMBER = re.compile(r"^\s*[（(](\d+[a-z]?)[）)]\s*$", re.I)
 _OPERATORS = {"arg", "min", "max", "argmin", "argmax", "sin", "cos", "tan", "log", "ln",
               "exp", "lim", "sup", "inf", "det", "diag", "rank", "tr", "Tr", "Var", "Cov", "Pr", "SVD", "SVDk", "ReLU"}
@@ -24,7 +24,7 @@ _GREEK_NAMES = {
     "λ": "lambda", "μ": "mu", "ν": "nu", "ξ": "xi", "π": "pi", "ϖ": "varpi",
     "ρ": "rho", "ϱ": "varrho", "σ": "sigma", "ς": "varsigma", "τ": "tau", "υ": "upsilon",
     "φ": "phi", "ϕ": "varphi", "χ": "chi", "ψ": "psi", "ω": "omega", "Γ": "Gamma",
-    "Δ": "Delta", "Θ": "Theta", "Λ": "Lambda", "Ξ": "Xi", "Π": "Pi", "Σ": "Sigma",
+    "Δ": "Delta", "∆": "Delta", "Θ": "Theta", "Λ": "Lambda", "Ξ": "Xi", "Π": "Pi", "Σ": "Sigma",
     "Υ": "Upsilon", "Φ": "Phi", "Ψ": "Psi", "Ω": "Omega",
 }
 _SYMBOLS = {
@@ -41,6 +41,7 @@ _SYMBOLS = {
     "ℚ": r"\mathbb{Q}", "ℓ": r"\ell ", "′": r"\prime ", "…": r"\ldots ", "∥": r"\Vert ",
     "⌊": r"\lfloor ", "⌋": r"\rfloor ", "⌈": r"\lceil ", "⌉": r"\rceil ",
     "⟨": r"\langle ", "⟩": r"\rangle ", "{": r"\{", "}": r"\}", "%": r"\%", "_": r"\_",
+    "√": r"\sqrt ", "≮": r"\nless ", "≯": r"\ngtr ", "†": r"\dagger ", "∗": r"\ast ",
 }
 
 
@@ -54,6 +55,8 @@ class _Glyph:
     baseline: float
     size: float
     font: str
+    name: str = ""
+    latex: str | None = None
 
 
 def keep_span_characters(span: dict) -> bool:
@@ -82,12 +85,22 @@ def _glyphs(spans: list[dict]) -> list[_Glyph]:
                 continue
             box = char.get("bbox", span["bbox"])
             origin = char.get("origin", span.get("origin", (box[0], box[3])))
-            result.append(_Glyph(value, *map(float, box), float(origin[1]), float(span["size"]), span["font"]))
+            result.append(_Glyph(value, *map(float, box), float(origin[1]), float(span["size"]), span["font"], char.get("_glyph_name", "")))
     return result
 
 
 def _tex(glyph: _Glyph) -> str | None:
     char = glyph.char
+    if glyph.latex is not None:
+        return glyph.latex
+    if char == "√":
+        return None  # A radical requires its proven overbar and radicand.
+    named = {"parenleftbig": "(", "parenrightbig": ")", "parenleftBig": "(", "parenrightBig": ")",
+             "parenleftbigg": "(", "parenrightbigg": ")", "parenleftBigg": "(", "parenrightBigg": ")",
+             "bracketleftbig": "[", "bracketrightbig": "]", "bracketleftBig": "[", "bracketrightBig": "]",
+             "bracketleftbigg": "[", "bracketrightbigg": "]", "bracketleftBigg": "[", "bracketrightBigg": "]"}
+    if glyph.name in named:
+        return named[glyph.name]
     # Computer Modern's extension font often decodes accents/delimiters as
     # unrelated ASCII letters. We cannot establish their meaning from a PDF
     # text extraction, even when the resulting string happens to look valid.
@@ -114,15 +127,16 @@ def _balanced(glyphs: list[_Glyph]) -> bool:
     stack = []
     pairs = {")": "(", "]": "[", "}": "{"}
     for glyph in sorted(glyphs, key=lambda item: item.x0):
-        if glyph.char in "([{":
-            stack.append(glyph.char)
-        elif glyph.char in pairs:
-            if not stack or stack.pop() != pairs[glyph.char]:
+        char = _tex(glyph) if glyph.name.startswith(("paren", "bracket")) else glyph.char
+        if char and char in "([{":
+            stack.append(char)
+        elif char in pairs:
+            if not stack or stack.pop() != pairs[char]:
                 return False
     return not stack
 
 
-def recover_expression(spans: list[dict], *, numbered: bool = False) -> str | None:
+def _recover_flat_expression(spans: list[dict], *, numbered: bool = False) -> str | None:
     """Return TeX only when the extracted characters and layout are unambiguous.
 
     ``spans`` must contain rawdict ``chars`` with original font, size, origin,
@@ -150,6 +164,13 @@ def recover_expression(spans: list[dict], *, numbered: bool = False) -> str | No
     glyphs = _glyphs(spans)
     if not glyphs or len(glyphs) > 450:
         return None
+    result = _flat_glyphs(glyphs, numbered=numbered)
+    if result and equation_number:
+        result += r"\tag{" + equation_number + "}"
+    return result
+
+
+def _flat_glyphs(glyphs: list[_Glyph], *, numbered: bool = False, continuation: bool = False) -> str | None:
     # Any glyph that cannot be decoded also invalidates the surrounding
     # expression. A plausible subset would silently alter its meaning.
     if any(_tex(glyph) is None for glyph in glyphs):
@@ -177,6 +198,7 @@ def recover_expression(spans: list[dict], *, numbered: bool = False) -> str | No
         overlap = min(left.x1, right.x1) - max(left.x0, right.x0)
         if overlap > min(left.x1 - left.x0, right.x1 - right.x0) * .55:
             return None
+    main = _named_operators(main)
 
     attachments: dict[int, dict[str, list[_Glyph]]] = {}
     script_groups: list[tuple[str, list[_Glyph]]] = []
@@ -191,13 +213,22 @@ def recover_expression(spans: list[dict], *, numbered: bool = False) -> str | No
             group.append(glyph)
     for key, group in script_groups:
         glyph = group[0]
-        candidates = [(index, item) for index, item in enumerate(main)
-                      if item.x0 <= glyph.x0 + base_size * .10 and item.x1 <= glyph.x0 + base_size * .55]
-        if not candidates:
-            return None
-        index, anchor = min(candidates, key=lambda pair: abs(pair[1].x1 - glyph.x0))
-        if glyph.x0 - anchor.x1 > base_size * .75:
-            return None
+        center = (group[0].x0 + group[-1].x1) / 2
+        centered = [(index, item) for index, item in enumerate(main)
+                    if item.name.startswith("operator:") and item.x0 <= center <= item.x1
+                    and abs(glyph.baseline - baseline) >= base_size * .4]
+        if len(centered) == 1:
+            index, anchor = centered[0]
+            name = anchor.name.split(":", 1)[1]
+            main[index] = replace(anchor, latex=r"\operatorname*{" + name + r"}\limits")
+        else:
+            candidates = [(index, item) for index, item in enumerate(main)
+                          if item.x0 <= glyph.x0 + base_size * .10 and item.x1 <= glyph.x0 + base_size * .55]
+            if not candidates:
+                return None
+            index, anchor = min(candidates, key=lambda pair: abs(pair[1].x1 - glyph.x0))
+            if glyph.x0 - anchor.x1 > base_size * .75:
+                return None
         attachments.setdefault(index, {}).setdefault(key, []).extend(group)
 
     pieces = []
@@ -215,16 +246,325 @@ def recover_expression(spans: list[dict], *, numbered: bool = False) -> str | No
             value += key + "{" + "".join(_tex(item) for item in script).strip() + "}"
         pieces.append(value)
     result = "".join(pieces).strip()
-    if main[0].char in "=<>*/" or main[-1].char in "=<>+*/-":
+    if (main[0].char and main[0].char in ("*/" if continuation else "=<>*/")) or (main[-1].char and main[-1].char in "=<>+*/-"):
         return None
-    # Standard named operators are roman in the source. Keep multi-letter
-    # names together without affecting adjacent italic variables.
-    for name in sorted(_OPERATORS, key=len, reverse=True):
-        result = re.sub(r"(?<![A-Za-z\\{])" + re.escape(name) + r"(?![A-Za-z}])",
-                        lambda match: r"\operatorname{" + match.group(0) + "}", result)
-    if equation_number:
-        result += r"\tag{" + equation_number + "}"
     return result or None
+
+
+def _named_operators(main: list[_Glyph]) -> list[_Glyph]:
+    """Group verified roman names before assigning a centered limit.
+
+    Attaching a limit to the nearest individual letter can turn ``min`` into
+    ``m_{x}in``. Word boundaries and roman font evidence keep the whole name
+    intact, while adjacent italic variables remain independent variables.
+    """
+    def roman(item):
+        return (not item.name and item.latex is None and bool(re.fullmatch(r"[A-Za-z]", item.char))
+                and bool(re.search(r"(?:^|\+)(?:CMR\d|CMSS\d)|Times-Roman|NimbusRom[^+]*Regu", item.font, re.I)))
+
+    result = []
+    index = 0
+    while index < len(main):
+        end = index + 1
+        if roman(main[index]):
+            while (end < len(main) and roman(main[end]) and main[end].font == main[index].font
+                   and 0 <= main[end].x0 - main[end - 1].x1 <= main[index].size * .12):
+                end += 1
+        group = main[index:end]
+        name = "".join(item.char for item in group)
+        if len(group) > 1 and name in _OPERATORS:
+            result.append(replace(_atom(group, r"\operatorname{" + name + "}", group[0].baseline,
+                                        group[0].size), name="operator:" + name))
+        else:
+            result.extend(group)
+        index = end
+    return result
+
+
+def annotate_page_math(page, lines: list) -> None:
+    """Retain structural evidence omitted by PDF text extraction.
+
+    Fraction/radical rules are vector strokes, not text. Extension-font
+    letters are decoded only when the embedded Type 1 Encoding supplies the
+    actual glyph name. No font program is executed and nothing leaves the PDF.
+    The annotations stay on temporary spans and never enter the stored paper.
+    """
+    mathematical = [span for line in lines for span in line.spans if span.get("chars")]
+    if not mathematical:
+        return
+    rules = []
+    try:
+        for path in page.get_drawings():
+            if path.get("type") != "s" or not 0 < float(path.get("width") or 0) <= 1.4:
+                continue
+            for item in path.get("items", []):
+                if item[0] != "l":
+                    continue
+                first, last = item[1:3]
+                x0, x1 = sorted((float(first.x), float(last.x)))
+                if abs(float(first.y) - float(last.y)) <= .15 and 1.0 <= x1 - x0 <= 400:
+                    rules.append((x0, (float(first.y) + float(last.y)) / 2, x1))
+                if len(rules) >= 4096:
+                    break
+            if len(rules) >= 4096:
+                break
+    except Exception:
+        rules = []
+    # A shared list avoids duplicating page geometry for every mathematical run.
+    for span in mathematical:
+        span["_math_rules"] = rules
+    extension = [span for span in mathematical if "CMEX" in span.get("font", "").upper()]
+    if not extension:
+        return
+    encodings = {}
+    try:
+        for font in page.get_fonts(full=True):
+            name = font[3].split("+")[-1]
+            if "CMEX" not in name.upper():
+                continue
+            _, format_name, _, raw = page.parent.extract_font(font[0])
+            if format_name.lower() != "pfa":
+                continue
+            header = raw[:65536].split(b"currentfile eexec", 1)[0].decode("latin-1")
+            encoding = {int(code): glyph for code, glyph in re.findall(
+                r"\bdup\s+(\d+)\s+/([A-Za-z][A-Za-z0-9]*)\s+put\b", header)}
+            # Only the verified built-in ASCII positions are used. Explicit
+            # Unicode mappings take precedence and cannot be reinterpreted.
+            unicode_codes = set()
+            unicode_values = set()
+            obj = page.parent.xref_object(font[0])
+            # A PDF-level Encoding can override the font program's built-in
+            # positions. Until that encoding is decoded, names from the PFA
+            # alone are insufficient evidence for these glyphs.
+            if re.search(r"/Encoding\b", obj):
+                continue
+            ref = re.search(r"/ToUnicode\s+(\d+)\s+0\s+R", obj)
+            if ref:
+                cmap = page.parent.xref_stream(int(ref.group(1))).decode("latin-1")
+                for section in re.findall(r"beginbfchar(.*?)endbfchar", cmap, re.S):
+                    for code, value in re.findall(r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>", section):
+                        unicode_codes.add(int(code, 16))
+                        if len(value) <= 4:
+                            unicode_values.add(int(value, 16))
+                for section in re.findall(r"beginbfrange(.*?)endbfrange", cmap, re.S):
+                    for low, high, values in re.findall(
+                            r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]+>|\[[^\]]*\])", section):
+                        start, end = int(low, 16), min(int(high, 16), 255)
+                        unicode_codes.update(range(start, end + 1))
+                        if values.startswith("["):
+                            unicode_values.update(int(value, 16) for value in re.findall(r"<([0-9A-Fa-f]{1,4})>", values))
+                        elif len(values) <= 6:
+                            first = int(values[1:-1], 16)
+                            unicode_values.update(range(first, first + max(0, end - start + 1)))
+            encodings[name] = {code: glyph for code, glyph in encoding.items()
+                               if code < 128 and code not in unicode_codes and code not in unicode_values}
+    except Exception:
+        encodings = {}
+    for span in extension:
+        encoding = encodings.get(span["font"].split("+")[-1], {})
+        for char in span.get("chars", []):
+            value = char.get("c", "")
+            if len(value) == 1 and ord(value) in encoding:
+                char["_glyph_name"] = encoding[ord(value)]
+
+
+def _atom(items: list[_Glyph], latex: str, baseline: float, size: float) -> _Glyph:
+    return _Glyph("", min(item.x0 for item in items), min(item.y0 for item in items),
+                  max(item.x1 for item in items), max(item.y1 for item in items),
+                  baseline, size, "", latex=latex)
+
+
+def _structured_expression(glyphs: list[_Glyph], rules: list[tuple]) -> str | None:
+    """Bottom-up layout recovery using explicit PDF glyphs and vector rules.
+
+    Every consumed character belongs to one validated node. Unsupported
+    structure leaves a node unresolved, causing the whole expression to use
+    the source fallback instead of emitting a plausible partial equation.
+    """
+    if not glyphs or len(glyphs) > 450:
+        return None
+    items = list(glyphs)
+    size = max(item.size for item in items)
+    # PDF fonts can emit a zero-width negation slash followed by a relation.
+    # Only that precise overlap is composed; a detached accent is not ignored.
+    for slash in list(items):
+        if slash.char != "\u0338" or slash.x1 - slash.x0 > size * .1:
+            continue
+        relations = [item for item in items if item.char in "=<>" and
+                     abs(item.baseline - slash.baseline) < size * .1 and
+                     -.15 * size <= item.x0 - slash.x0 <= size * .5]
+        if len(relations) == 1:
+            relation = relations[0]
+            items[items.index(relation)] = replace(relation, char={"=": "≠", "<": "≮", ">": "≯"}[relation.char])
+            items.remove(slash)
+    # PDF's extension glyph origin is at the top rather than the baseline.
+    # For verified delimiters, surrounding normal-sized text supplies the row.
+    ordinary = [item for item in items if "CMEX" not in item.font.upper() and item.size >= size * .88]
+    if ordinary:
+        baseline = Counter(round(item.baseline, 1) for item in ordinary).most_common(1)[0][0]
+        items = [replace(item, baseline=baseline, char=_tex(item)) if item.name.startswith(("paren", "bracket")) and _tex(item)
+                 else item for item in items]
+    active_rules = list(dict.fromkeys(tuple(rule) for rule in rules))
+    roots = [item for item in items if item.char == "√" or item.name in {"radicalbig", "radicalBig", "radicalbigg", "radicalBigg"}]
+    root_bars = {}
+    for root in roots:
+        matches = [rule for rule in active_rules if
+                   -.2 * size <= rule[0] - root.x1 <= size * .7 and
+                   root.y0 - size * .1 <= rule[1] <= root.y1 + size * .2]
+        if matches:
+            root_bars[root] = min(matches, key=lambda rule: abs(rule[1] - root.baseline))
+    fraction_bars = sorted([rule for rule in active_rules if rule not in root_bars.values()], key=lambda rule: rule[2] - rule[0])
+    for _ in range(min(64, len(items) + len(active_rules))):
+        changed = False
+        for accent in list(items):
+            command = (r"\widehat" if accent.name in {"hatwide", "hatwider", "hatwidest"} else
+                       r"\widetilde" if accent.name in {"tildewide", "tildewider", "tildewidest"} else None)
+            if command is None:
+                continue
+            body = [item for item in items if item != accent and item.size >= accent.size * .88
+                    and accent.baseline + size * .1 <= item.baseline <= accent.baseline + size * .65
+                    and accent.x0 - size * .15 <= (item.x0 + item.x1) / 2 <= accent.x1 + size * .15
+                    and (item.latex is not None or item.char.isalnum() or item.char in _GREEK_NAMES)]
+            value = _flat_glyphs(body) if body else None
+            if not value:
+                continue
+            atom = _atom([accent, *body], command + "{" + value + "}", body[0].baseline, body[0].size)
+            items = [item for item in items if item != accent and item not in body] + [atom]
+            changed = True
+        for root, rule in list(root_bars.items()):
+            if root not in items:
+                continue
+            x0, y, x1 = rule
+            radicand = [item for item in items if item != root and
+                        x0 - size * .12 <= (item.x0 + item.x1) / 2 <= x1 + size * .12 and
+                        y + size * .15 <= item.baseline <= y + max(size * 1.1, root.y1 - y + size * .2)]
+            value = _flat_glyphs(radicand) if radicand else None
+            if value:
+                local_size = max(item.size for item in radicand)
+                baseline = max(item.baseline for item in radicand if item.size >= local_size * .88)
+                atom = _atom([root, *radicand], r"\sqrt{" + value + "}", baseline, size)
+                items = [item for item in items if item != root and item not in radicand] + [atom]
+                root_bars.pop(root)
+                changed = True
+        for rule in list(fraction_bars):
+            x0, y, x1 = rule
+            within = [item for item in items if not item.name.startswith("bracehtip") and
+                      x0 - size * .12 <= (item.x0 + item.x1) / 2 <= x1 + size * .12]
+            numerator = [item for item in within if y - size * 2.0 <= item.baseline < y - size * .05]
+            denominator = [item for item in within if y + size * .35 < item.baseline <= y + size * 2.0]
+            if not numerator or not denominator:
+                continue
+            top, bottom = _flat_glyphs(numerator), _flat_glyphs(denominator)
+            if not top or not bottom:
+                continue
+            # A fraction rule must span every numerator/denominator character,
+            # including script boxes; nearby columns cannot be consumed.
+            if any(item.x0 < x0 - size * .2 or item.x1 > x1 + size * .2
+                   for item in [*numerator, *denominator]):
+                continue
+            atom = _atom([*numerator, *denominator], r"\frac{" + top + "}{" + bottom + "}", y + size * .25, size)
+            items = [item for item in items if item not in numerator and item not in denominator] + [atom]
+            fraction_bars.remove(rule)
+            changed = True
+        # A horizontal underbrace consists of four named Type 1 tip glyphs.
+        # ASCII lookalikes from an unknown font cannot activate this rule.
+        tips = sorted([item for item in items if item.name.startswith("bracehtip")], key=lambda item: item.x0)
+        for start in range(max(0, len(tips) - 3)):
+            brace = tips[start:start + 4]
+            if [item.name for item in brace] != ["bracehtipupleft", "bracehtipdownright", "bracehtipdownleft", "bracehtipupright"]:
+                continue
+            baseline = brace[0].baseline
+            if any(abs(item.baseline - baseline) > size * .1 for item in brace):
+                continue
+            x0, x1 = brace[0].x0, brace[-1].x1
+            above = [item for item in items if item not in brace and
+                     item.x0 >= x0 - size * .15 and item.x1 <= x1 + size * .15 and
+                     baseline - size * 3.0 <= item.baseline < baseline - size * .4]
+            label = [item for item in items if item not in brace and
+                     x0 - size * .15 <= (item.x0 + item.x1) / 2 <= x1 + size * .15 and
+                     baseline + size * .4 < item.baseline <= baseline + size * 1.6]
+            top, bottom = _flat_glyphs(above) if above else None, _flat_glyphs(label) if label else None
+            if not top or not bottom:
+                continue
+            atom = _atom([*above, *brace, *label], r"\underbrace{" + top + "}_{" + bottom + "}", above[0].baseline, size)
+            items = [item for item in items if item not in above and item not in brace and item not in label] + [atom]
+            changed = True
+            break
+        if not changed:
+            break
+    return _flat_glyphs(items) or _continued_rows(items)
+
+
+def _continued_rows(glyphs: list[_Glyph]) -> str | None:
+    """Preserve clearly separated equation continuations as explicit rows.
+
+    Only a full first relation followed by rows beginning with another
+    relation qualifies. Arbitrary stacked numerators, matrix cells or two
+    unrelated equations cannot become a multiline display through this path.
+    """
+    size = max((item.size for item in glyphs), default=0)
+    main = sorted([item for item in glyphs if item.size >= size * .88], key=lambda item: item.baseline)
+    rows = []
+    for item in main:
+        if not rows or abs(item.baseline - rows[-1][0].baseline) > size * .32:
+            rows.append([item])
+        else:
+            rows[-1].append(item)
+    if not 2 <= len(rows) <= 5:
+        return None
+    if any(not size * .65 <= bottom[0].baseline - top[0].baseline <= size * 2.2
+           for top, bottom in zip(rows, rows[1:])):
+        return None
+    relation = lambda item: item.char in "=<>≈≃≅≠≤≥≪≫∈∉∼∝→↔⇒⇔" and bool(item.char)
+    if not any(relation(item) for item in rows[0]):
+        return None
+    if any(not relation(min(row, key=lambda item: item.x0)) for row in rows[1:]):
+        return None
+    for item in glyphs:
+        if item in main:
+            continue
+        distances = sorted((abs(item.baseline - row[0].baseline), index) for index, row in enumerate(rows))
+        if distances[0][0] > size * .8 or distances[1][0] - distances[0][0] < size * .12:
+            return None
+        rows[distances[0][1]].append(item)
+    values = [_flat_glyphs(row, continuation=index > 0) for index, row in enumerate(rows)]
+    if not all(values):
+        return None
+    return r"\begin{aligned}" + r"\\".join("&" + value for value in values) + r"\end{aligned}"
+
+
+def recover_expression(spans: list[dict], *, numbered: bool = False) -> str | None:
+    simple = _recover_flat_expression(spans, numbered=numbered)
+    if simple:
+        return simple
+    if not spans or any(span.get("text", "").strip() and not span.get("chars") for span in spans):
+        return None
+    number = None
+    if numbered:
+        other = [span for span in spans if not _NUMBER.fullmatch(span.get("text", ""))]
+        right = max((span["bbox"][2] for span in other), default=0)
+        kept = []
+        for span in spans:
+            match = _NUMBER.fullmatch(span.get("text", ""))
+            if match and span["bbox"][0] > right + float(span["size"]):
+                if number is not None:
+                    return None
+                number = match.group(1)
+            else:
+                kept.append(span)
+        spans = kept
+    glyphs = _glyphs(spans)
+    groups = {id(span["_math_rules"]): span["_math_rules"] for span in spans if span.get("_math_rules")}
+    box = (min((item.x0 for item in glyphs), default=0), min((item.y0 for item in glyphs), default=0),
+           max((item.x1 for item in glyphs), default=0), max((item.y1 for item in glyphs), default=0))
+    rules = [rule for group in groups.values() for rule in group
+             if rule[0] >= box[0] - 2 and rule[2] <= box[2] + 2 and box[1] - 2 <= rule[1] <= box[3] + 2]
+    result = _structured_expression(glyphs, rules)
+    if result and numbered and not re.search(r"[=<>]|\\(?:le|ge|ne|in|sim|to)\b", result):
+        return None
+    if result and number:
+        result += r"\tag{" + number + "}"
+    return result
 
 
 def _span_text(spans: list[dict]) -> str:
@@ -243,7 +583,7 @@ def _span_text(spans: list[dict]) -> str:
 
 def _is_seed(span: dict) -> bool:
     text = span.get("text", "").strip()
-    return bool(text and (_MATH_FONT.search(span.get("font", ""))
+    return bool(text and (_MATH_FONT.search(span.get("font", "")) or "√" in text
                          or (any(char in _GREEK_NAMES for char in text) and not re.search(r"[A-Za-z]{2}", text))))
 
 

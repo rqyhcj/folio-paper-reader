@@ -23,7 +23,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import storage as db
 from .demo import make_demo
-from .pdf_parser import extract_pdf, PDFExtractionError
+from .pdf_parser import extract_pdf, PDFExtractionError, PARSE_VERSION
+from .reflow import reflow_paper
 from .document_parser import extract_document, DocumentExtractionError
 from .translator import TranslationError, test_connection, translate_text, validate_endpoint
 from .providers import PROVIDERS, requires_key
@@ -36,6 +37,7 @@ from .translation_input import paragraph_input, validate_translation
 
 jobs: dict[str, asyncio.Task] = {}
 figure_jobs: dict[str, asyncio.Task] = {}
+parse_jobs: dict[str, asyncio.Task] = {}
 FIGURE_VERSION = 2
 MAX_UPLOAD = 50 * 1024 * 1024
 SOURCE_FILES = {
@@ -51,7 +53,7 @@ SOURCE_FILES = {
 async def lifespan(app):
     db.init_storage()
     yield
-    active = list(jobs.values()) + list(figure_jobs.values())
+    active = list(jobs.values()) + list(figure_jobs.values()) + list(parse_jobs.values())
     for task in active:
         task.cancel()
     await asyncio.gather(*active, return_exceptions=True)
@@ -127,7 +129,7 @@ def ensure_figures(paper: dict, raw: bytes | None = None) -> dict:
     """Schedule artwork separately; neither import nor opening a paper waits for it."""
     paper_id = paper["id"]
     # Non-PDF images are already extracted with their document's reading order.
-    if paper.get("source_format", "pdf") != "pdf":
+    if paper.get("source_format", "pdf") != "pdf" or paper.get("parse_status") == "updating":
         return paper
     if paper_id in figure_jobs and not figure_jobs[paper_id].done():
         return paper
@@ -145,6 +147,75 @@ def ensure_figures(paper: dict, raw: bytes | None = None) -> dict:
     db.save_paper(paper)
     figure_jobs[paper_id] = asyncio.create_task(figure_job(paper_id, raw))
     return paper
+
+
+def ensure_current_parse(paper: dict) -> dict:
+    """Upgrade saved PDFs locally while their previously saved text stays readable."""
+    paper_id = paper["id"]
+    if (paper.get("is_demo") or paper.get("source_format", "pdf") != "pdf"
+            or not isinstance(paper.get("parse_version"), int)
+            or paper["parse_version"] >= PARSE_VERSION
+            or paper.get("parse_attempt_version") == PARSE_VERSION
+            or paper.get("status") == "translating"
+            or (paper_id in jobs and not jobs[paper_id].done())):
+        return paper
+    if paper_id in parse_jobs and not parse_jobs[paper_id].done():
+        return paper
+    path = source_file(paper)
+    if not path.is_file():
+        return paper
+    paper.update(parse_status="updating", parse_target_version=PARSE_VERSION)
+    paper.pop("parse_error", None)
+    db.save_paper(paper)
+    parse_jobs[paper_id] = asyncio.create_task(parse_job(paper_id, path))
+    return paper
+
+
+async def parse_job(paper_id: str, path: Path):
+    worker = None
+    try:
+        initial = paper_or_404(paper_id)
+        raw = await asyncio.to_thread(path.read_bytes)
+        worker = asyncio.create_task(asyncio.to_thread(extract_pdf, raw, initial["filename"]))
+        parsed = await asyncio.shield(worker)
+        current = db.get_paper(paper_id)
+        if current is None or current.get("parse_version", 0) >= PARSE_VERSION:
+            return
+        # Never replace paragraph IDs while a translation worker uses them.
+        if current.get("status") == "translating" or (paper_id in jobs and not jobs[paper_id].done()):
+            current["parse_status"] = "pending"
+            db.save_paper(current)
+            return
+        artwork = figure_jobs.get(paper_id)
+        if artwork and not artwork.done():
+            artwork.cancel()
+            await asyncio.gather(artwork, return_exceptions=True)
+        current = db.get_paper(paper_id)
+        if current is None:
+            return
+        # Re-read after the background work so newly saved translations survive.
+        updated = reflow_paper(current, parsed)
+        updated.update(parse_status="completed", parse_target_version=PARSE_VERSION)
+        updated.pop("parse_error", None)
+        updated.pop("parse_attempt_version", None)
+        db.save_paper(updated)
+        ensure_figures(updated, raw)
+    except asyncio.CancelledError:
+        if worker is not None:
+            await asyncio.gather(worker, return_exceptions=True)
+        current = db.get_paper(paper_id)
+        if current is not None:
+            current["parse_status"] = "pending"
+            db.save_paper(current)
+        raise
+    except Exception:
+        current = db.get_paper(paper_id)
+        if current is not None:
+            current.update(parse_status="error", parse_attempt_version=PARSE_VERSION,
+                           parse_error="这篇论文的排版暂未更新，已保留原文和全部译文。")
+            db.save_paper(current)
+    finally:
+        parse_jobs.pop(paper_id, None)
 
 
 async def figure_job(paper_id: str, raw: bytes | None = None):
@@ -337,7 +408,7 @@ def demo():
 
 @app.get("/api/papers/{paper_id}")
 async def get_paper(paper_id: str):
-    return ensure_figures(paper_or_404(paper_id))
+    return ensure_figures(ensure_current_parse(paper_or_404(paper_id)))
 
 
 async def translation_job(paper_id: str, config: dict, paragraph_ids: list[str] | None = None):
@@ -402,6 +473,8 @@ async def translation_job(paper_id: str, config: dict, paragraph_ids: list[str] 
 @app.post("/api/papers/{paper_id}/translate")
 async def start_translation(paper_id: str, payload: TranslateInput = TranslateInput()):
     paper = paper_or_404(paper_id)
+    if paper_id in parse_jobs and not parse_jobs[paper_id].done():
+        raise HTTPException(409, "正在本机更新论文排版，请稍后开始翻译；已有译文会保留。")
     if paper_id in jobs and not jobs[paper_id].done():
         return paper
     if any(not task.done() for task in jobs.values()):
@@ -433,6 +506,8 @@ async def pause_translation(paper_id: str):
 @app.post("/api/papers/{paper_id}/paragraphs/{paragraph_id}/translate")
 async def retry_paragraph(paper_id: str, paragraph_id: str):
     paper = paper_or_404(paper_id)
+    if paper_id in parse_jobs and not parse_jobs[paper_id].done():
+        raise HTTPException(409, "正在本机更新论文排版，请稍后重试；已有译文会保留。")
     if any(not task.done() for task in jobs.values()):
         raise HTTPException(409, "请先暂停当前翻译，再重新翻译单段。")
     paragraph = next((p for p in paper["paragraphs"] if p["id"] == paragraph_id), None)
@@ -459,6 +534,10 @@ async def retry_paragraph(paper_id: str, paragraph_id: str):
 async def remove_paper(paper_id: str):
     paper = paper_or_404(paper_id)
     await pause_translation(paper_id)
+    parser = parse_jobs.get(paper_id)
+    if parser and not parser.done():
+        parser.cancel()
+        await asyncio.gather(parser, return_exceptions=True)
     task = figure_jobs.get(paper_id)
     if task and not task.done():
         task.cancel()
@@ -518,6 +597,11 @@ async def export(paper_id: str, format: str = "markdown"):
     paper = paper_or_404(paper_id)
     if format not in ("markdown", "html", "pdf"):
         raise HTTPException(400, "支持导出 markdown、html 或 pdf。")
+    ensure_current_parse(paper)
+    parser = parse_jobs.get(paper_id)
+    if parser and not parser.done():
+        await asyncio.shield(parser)
+    paper = paper_or_404(paper_id)
     if format in ("pdf", "html"):
         ensure_figures(paper)
         task = figure_jobs.get(paper_id)

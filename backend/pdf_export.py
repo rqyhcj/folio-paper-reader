@@ -1,17 +1,20 @@
 """Portable bilingual PDF export using MuPDF's bundled, embedded fonts.
 
-This is deliberately plain text layout: paper text never becomes executable HTML,
-and no Windows fonts, remote resources, or runtime font downloads are needed.
+Paper text never becomes executable HTML. Mathematical expressions are drawn
+as local vector paths; no Windows fonts, remote resources or TeX installation
+are needed.
 """
 from __future__ import annotations
 
 from collections import defaultdict
+from contextlib import ExitStack
 from pathlib import Path
 import re
 
 import fitz
 from .pdf_runtime import synchronized_pdf
 from .inline_math_export import TOKEN, slots, text_with_math
+from .math_typeset import split_math, render_formula
 
 
 PAGE_WIDTH, PAGE_HEIGHT = fitz.paper_size("a4")
@@ -65,8 +68,10 @@ def _wrap(text: str, font: fitz.Font, size: float, width: float) -> list[str]:
 
 
 class _Layout:
-    def __init__(self, document: fitz.Document):
+    def __init__(self, document: fitz.Document, math_sources: ExitStack):
         self.document = document
+        self.math_sources = math_sources
+        self.math_documents: dict[bytes, fitz.Document] = {}
         # TextWriter embeds these bundled fonts (including its CJK fallback).
         self.cjk = fitz.Font("cjk")
         self.english = fitz.Font("tiro")
@@ -83,9 +88,22 @@ class _Layout:
         if self.y + height > BODY_BOTTOM and self.y > BODY_TOP:
             self.next_page()
 
+    def formula(self, formula, rect):
+        source = self.math_documents.get(formula.pdf)
+        if source is None:
+            source = self.math_sources.enter_context(fitz.open(stream=formula.pdf, filetype="pdf"))
+            self.math_documents[formula.pdf] = source
+        # Reusing the source Document lets MuPDF reuse its grafted vector XObject
+        # when the same expression appears in both languages or repeated lines.
+        self.page.show_pdf_page(rect, source, 0)
+
     def text(self, value: str, *, font: fitz.Font | None = None, size=11.2,
              leading=18.0, color=INK, after=0.0):
         font = font or self.cjk
+        parts = split_math(value)
+        if any(part.math for part in parts):
+            self.math_text(parts, font=font, size=size, leading=leading, color=color, after=after)
+            return
         lines = _wrap(value, font, size, BODY_WIDTH)
         writer = fitz.TextWriter(self.page.rect)
         has_text = False
@@ -103,6 +121,97 @@ class _Layout:
             self.y += leading
         if has_text:
             writer.write_text(self.page, color=color)
+        self.y += after
+
+    def math_text(self, parts, *, font, size, leading, color, after):
+        """Wrap prose and atomic formula boxes on a shared, measured baseline."""
+        runs = []
+        used = 0.0
+
+        def flush(force=False):
+            nonlocal runs, used
+            while runs and runs[-1][0] == "space":
+                runs.pop()
+            if not runs:
+                if force:
+                    self.ensure(leading)
+                    self.y += leading
+                used = 0
+                return
+            ascent = max([font.ascender * size] + [run[3] for run in runs])
+            descent = max([-font.descender * size] + [run[4] for run in runs])
+            height = max(leading, ascent + descent + 2)
+            self.ensure(height)
+            baseline = self.y + ascent
+            writer = fitz.TextWriter(self.page.rect)
+            text_pending = False
+            x = MARGIN
+            buffered = ""
+            buffer_x = x
+            for kind, content, width, up, down in runs:
+                if kind == "formula":
+                    if buffered:
+                        writer.append((buffer_x, baseline), buffered, font=font, fontsize=size)
+                        text_pending = True
+                        buffered = ""
+                    self.formula(content, fitz.Rect(x, baseline - up, x + width, baseline + down))
+                elif content:
+                    if not buffered:
+                        buffer_x = x
+                    buffered += content
+                x += width
+            if buffered:
+                writer.append((buffer_x, baseline), buffered, font=font, fontsize=size)
+                text_pending = True
+            if text_pending:
+                writer.write_text(self.page, color=color)
+            self.y += height
+            runs, used = [], 0.0
+
+        def add(kind, content, width, up=0.0, down=0.0):
+            nonlocal used
+            if runs and used + width > BODY_WIDTH:
+                flush()
+            if kind == "space" and not runs:
+                return
+            runs.append((kind, content, width, up, down))
+            used += width
+
+        for part in parts:
+            if part.math:
+                formula = render_formula(part.text, float(size), part.display, tuple(color))
+                if formula is None:
+                    # Preserve an explicit, readable failure rather than printing
+                    # unsupported commands as though they were a valid formula.
+                    notice = "〔公式未能排版，请查看原 PDF〕"
+                    add("text", notice, font.text_length(notice, fontsize=size))
+                    continue
+                scale = min(1.0, BODY_WIDTH / formula.width,
+                            (BODY_BOTTOM - BODY_TOP - 10) / formula.height)
+                width, height = formula.width * scale, formula.height * scale
+                ascent, descent = formula.ascent * scale, formula.descent * scale
+                if part.display:
+                    flush()
+                    self.ensure(height + 10)
+                    x = MARGIN + (BODY_WIDTH - width) / 2
+                    self.formula(formula, fitz.Rect(x, self.y + 3, x + width, self.y + 3 + height))
+                    self.y += height + 10
+                else:
+                    add("formula", formula, width, ascent, descent)
+                continue
+            for token in re.findall(r"\n|[^\S\n]+|[^\s]+", part.text.expandtabs(4)):
+                if token == "\n":
+                    flush(force=bool(runs))
+                elif token.isspace():
+                    add("space", " ", font.text_length(" ", fontsize=size))
+                else:
+                    width = font.text_length(token, fontsize=size)
+                    if width > BODY_WIDTH or re.search(r"[\u3400-\u9fff]", token):
+                        for char in token:
+                            add("text", char, font.text_length(char, fontsize=size))
+                    else:
+                        add("text", token, width)
+        flush()
         self.y += after
 
     def figure(self, figure: dict, path: Path):
@@ -165,8 +274,8 @@ def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None,
     equation_paths = equation_paths or {}
     inline_paths = inline_paths or {}
     title = _clean(paper.get("title")) or "未命名论文"
-    with fitz.open() as document:
-        layout = _Layout(document)
+    with fitz.open() as document, ExitStack() as math_sources:
+        layout = _Layout(document, math_sources)
         layout.text("BILINGUAL PAPER", font=layout.bold, size=8.5, leading=15,
                     color=TRANSLATION, after=10)
         layout.text(title, font=layout.english, size=23, leading=31, after=14)

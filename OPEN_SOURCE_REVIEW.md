@@ -21,6 +21,8 @@
 | HTTPX | BSD-3-Clause | 保留版权、许可及免责声明，不暗示原作者为本产品背书。 |
 | Uvicorn | BSD-3-Clause | 同上。 |
 | python-multipart | Apache-2.0 | 保留许可和适用声明；如果分发修改版本，还应标记修改并保留适用 NOTICE。 |
+| Ziamath / Ziafont / latex2mathml | MIT | 2026-10-25 新增离线 PDF 数学排版依赖；通过 pip 安装，分发其代码或二进制时保留上游版权和许可。 |
+| Ziamath 随附 STIX Two Math 字体 | SIL Open Font License 1.1 | 字体保留自身 OFL、版权和 Reserved Font Names；当前源码仓库不另行复制该字体。 |
 | KaTeX 0.19.0 JavaScript / CSS / auto-render | MIT | 将官方发行文件置于 `static/vendor/katex/`；保留该目录中的上游 `LICENSE`。 |
 | KaTeX 字体（TTF / WOFF / WOFF2） | SIL Open Font License 1.1 | 字体单独遵循 OFL，保留字体版权、Reserved Font Names 和完整 `fonts/OFL.txt`；不能只保留包根目录 MIT。 |
 
@@ -33,6 +35,8 @@ KaTeX 的包级许可依据：[v0.19.0 LICENSE](https://raw.githubusercontent.co
 AGPL 的远程网络条款与分发要求见 [PyMuPDF 上游所附完整 AGPL 文本](https://raw.githubusercontent.com/pymupdf/PyMuPDF/1.26.7/COPYING)。如将本项目修改成联网服务，须向远程使用者显著提供取得对应版本源码的机会；若分发二进制，还须满足对应源码的提供要求。AGPL 不禁止商业使用，但要求履行相应义务。
 
 ## 数据、凭据和素材
+
+2026-10-25 数学排版依赖补充依据：[Ziamath MIT](https://raw.githubusercontent.com/cdelker/ziamath/master/LICENSE.txt)、[Ziafont MIT](https://raw.githubusercontent.com/cdelker/ziafont/master/LICENSE.txt)、[latex2mathml MIT](https://raw.githubusercontent.com/roniemartinez/latex2mathml/master/LICENSE)、[STIX 字体 OFL](https://raw.githubusercontent.com/stipub/stixfonts/master/OFL.txt)。本次安装版本为 Ziamath 0.13、Ziafont 0.11、latex2mathml 3.81.1；依赖仍按声明范围安装，不将这些版本视为未来所有安装结果。
 
 - 初次审阅的生产源代码中未发现真实密钥常量；测试所用密钥为明确的虚构测试值。原配置的默认天津接口和“本机已配置用户密钥”说明需在公开版本中清理。原密钥曾通过聊天提供，建议在其服务商后台轮换，公开仓库时不复用或重发该密钥。
 - API Key 仅用于请求头；公开设置响应不返回完整密钥。Windows 版本使用当前系统用户的 DPAPI 加密本机保存值。这不取代操作系统账户安全，整个 `data/` 仍应排除在发布物之外。

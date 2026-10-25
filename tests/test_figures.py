@@ -201,12 +201,16 @@ def test_pdf_api_export_has_readable_chinese_bilingual_order_and_original_figure
         assert document.page_count >= 1
         text = "\n".join(page.get_text() for page in document)
         compact = "".join(text.split())
-        source_compact = "".join(source.split())
-        translated_compact = "".join(translated.split())
+        # Mathematics is exported as local vector glyphs rather than printable
+        # TeX text. Verify both prose order and the embedded formula drawings.
+        source_compact = "".join(source.replace("$k$", "").replace("$k+1$", "").split())
+        translated_compact = "".join(translated.replace("$k$", "").replace("$k+1$", "").split())
         assert source_compact in compact
         assert translated_compact in compact
         assert compact.index(source_compact) < compact.index(translated_compact)
-        assert "$k+1$" in text  # PDF keeps TeX source; browser/HTML renders it.
+        assert "$k$" not in text and "$k+1$" not in text
+        assert "公式未能排版" not in text
+        assert sum(len(page.get_drawings()) for page in document) >= 4
         assert sum(len(page.get_images()) for page in document) >= 1
         assert "Figure1:" in compact
         assert any("中文" in page.get_text() for page in document) or "下一个整数" in compact

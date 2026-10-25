@@ -15,6 +15,10 @@ The application does not include a model, credentials, paper library, or publish
 | Uvicorn | BSD-3-Clause | <https://github.com/Kludex/uvicorn/blob/main/LICENSE.md> |
 | HTTPX | BSD-3-Clause | <https://github.com/encode/httpx/blob/master/LICENSE.md> |
 | python-multipart | Apache-2.0 | <https://github.com/Kludex/python-multipart/blob/master/LICENSE.txt> |
+| Ziamath | MIT | <https://github.com/cdelker/ziamath/blob/master/LICENSE.txt> |
+| Ziafont (via Ziamath) | MIT | <https://github.com/cdelker/ziafont/blob/master/LICENSE.txt> |
+| latex2mathml (via Ziamath) | MIT | <https://github.com/roniemartinez/latex2mathml/blob/master/LICENSE> |
+| STIX Two Math font (via Ziamath) | SIL OFL-1.1 | <https://github.com/stipub/stixfonts/blob/master/OFL.txt> |
 | KaTeX 0.19.0 scripts and CSS | MIT | `static/vendor/katex/LICENSE`; <https://github.com/KaTeX/KaTeX/blob/main/LICENSE> |
 | KaTeX font files | SIL OFL-1.1 | `static/vendor/katex/fonts/OFL.txt` and `fonts/NOTICE.txt`; <https://openfontlicense.org/documents/OFL.txt> |
 

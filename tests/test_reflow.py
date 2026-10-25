@@ -197,8 +197,70 @@ def test_protected_math_translation_with_exact_matching_tokens_can_be_reused():
     assert result["paragraphs"][0]["translation"] == translated
 
 
+def test_newly_recovered_latex_cannot_inherit_old_unresolved_image_tokens():
+    source = "The inner product is a transposed matrix product."
+    text = "内积为 ⟦FOLIO_MATH_1⟧。"
+    old = paper([paragraph("old", source, translation=text,
+                           translation_text="The inner product is ⟦FOLIO_MATH_1⟧.",
+                           inline_math=[dict(id="FOLIO_MATH_1")])])
+    new = paragraph("new", r"The inner product is \(A^T B\).", source_text=source)
+    result = reflow_paper(old, parsed([new]))
+    target = result["paragraphs"][0]
+    assert target["translation"] is None
+    assert target["translation_review_reason"] == "protected-math-source"
+    assert "previous_translation_parts" not in target
+    assert result["translation_history"][-1]["paragraphs"][0]["translation"] == text
+
+
 def test_review_saved_translation_does_not_modify_inputs():
     saved = paragraph("old", "p", translation="请提供需要翻译的英文论文片段。")
     before = deepcopy(saved)
     assert review_saved_translation(saved) == {"reason": "model-requested-source", "parts": []}
     assert saved == before
+
+
+def test_confirmed_margin_numbers_and_word_breaks_keep_a_whole_saved_translation():
+    old = paper([paragraph("old", "011 A quantiza- 012 tion method preserves 128 values.",
+                           bbox=[24, 100, 280, 130], translation="011 这种量化方法保留 128 个值。")])
+    new = parsed([paragraph("new", "A quantization method preserves 128 values.", bbox=[50, 100, 280, 130])],
+                 removed_line_numbers=[dict(page=1, text="011", bbox=[24, 101, 37, 109]),
+                                       dict(page=1, text="012", bbox=[24, 117, 37, 125])])
+    result = reflow_paper(old, new)
+    assert result["paragraphs"][0]["translation"] == "这种量化方法保留 128 个值。"
+    assert result["translation_history"][-1]["paragraphs"] == old["paragraphs"]
+    assert old["paragraphs"][0]["translation"].startswith("011 ")
+
+
+def test_only_matching_page_and_recorded_gutter_geometry_can_remove_a_number():
+    old = paper([paragraph("old", "143 is a real sample count.", bbox=[50, 100, 280, 120],
+                           translation="143 是真实样本数量。")])
+    for marker in (dict(page=2, text="143", bbox=[50, 102, 65, 110]),
+                   dict(page=1, text="143", bbox=[24, 102, 37, 110])):
+        new = parsed([paragraph("new", "143 is a real sample count.", bbox=[50, 100, 280, 120])],
+                     removed_line_numbers=[marker])
+        result = reflow_paper(old, new)
+        assert result["paragraphs"][0]["translation"] == "143 是真实样本数量。"
+
+
+def test_ambiguous_repeated_numbers_cannot_be_removed_from_saved_prose():
+    old = paper([paragraph("old", "011 We used 011 samples.", bbox=[24, 100, 280, 120],
+                           translation="011 我们使用了 011 个样本。")])
+    new = parsed([paragraph("new", "We used 011 samples.", bbox=[50, 100, 280, 120])],
+                 removed_line_numbers=[dict(page=1, text="011", bbox=[24, 102, 37, 110])])
+    result = reflow_paper(old, new)
+    assert result["paragraphs"][0]["translation"] is None
+    assert result["translation_history"][-1]["paragraphs"][0]["translation"] == old["paragraphs"][0]["translation"]
+
+
+def test_interior_review_markers_in_old_translation_remain_a_labelled_prior_result():
+    old = paper([paragraph("old", "011 A quantiza- 012 tion method works.",
+                           bbox=[24, 100, 280, 130], translation="011 量化 012 方法有效。")])
+    new = parsed([paragraph("new", "A quantization method works.", bbox=[50, 100, 280, 130])],
+                 removed_line_numbers=[dict(page=1, text="011", bbox=[24, 101, 37, 109]),
+                                       dict(page=1, text="012", bbox=[24, 117, 37, 125])])
+    result = reflow_paper(old, new)
+    target = result["paragraphs"][0]
+    assert target["translation"] is None
+    assert target["translation_review_reason"] == "review-line-number-residue"
+    assert target["previous_translation_parts"][0]["translation"] == "量化 012 方法有效。"
+    assert result["translation_history"][-1]["paragraphs"] == old["paragraphs"]

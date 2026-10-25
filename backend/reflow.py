@@ -51,6 +51,56 @@ def _overlap(old_box, new_box, *, fragment=False) -> float:
     return intersection / (old_area if fragment else min(old_area, new_area))
 
 
+def _without_review_line_numbers(paragraph: dict, removed: list[dict], positions: dict) -> dict:
+    """Clean only numbered gutter spans recorded inside this old paragraph.
+
+    Reflow matching may ignore a removed margin marker, but never arbitrary
+    prose numbers. Ambiguous repeated numeric tokens are left untouched. The
+    unmodified record remains in translation_history before this helper runs.
+    """
+    box = _box(positions.get(paragraph.get("id"))) or _box(paragraph.get("bbox"))
+    if box is None:
+        return paragraph
+    source = _source(paragraph)
+    markers = []
+    for item in removed:
+        marker_box = _box(item.get("bbox"))
+        value = str(item.get("text", ""))
+        if (item.get("page") != paragraph.get("page") or marker_box is None
+                or not re.fullmatch(r"[0-9]{1,4}", value)):
+            continue
+        if (marker_box[0] >= box[0] - 1 and marker_box[2] <= box[2] + 1
+                and box[1] - 1 <= (marker_box[1] + marker_box[3]) / 2 <= box[3] + 1):
+            pattern = r"(?<![\w.])" + re.escape(value) + r"(?![\w.])"
+            if len(re.findall(pattern, source)) == 1:
+                markers.append((value, pattern))
+    if not markers:
+        return paragraph
+    cleaned = deepcopy(paragraph)
+    first = re.match(r"^\s*([0-9]{1,4})(?=\s)", source)
+    for _, pattern in markers:
+        # A removed marker records a real PDF line boundary. Retaining that
+        # boundary lets the existing conservative matcher rejoin broken words.
+        source = re.sub(r"[ \t]*" + pattern + r"[ \t]*", "\n", source)
+    cleaned["source_text"] = source.strip()
+    if first and first.group(1) in {value for value, _ in markers}:
+        translation = cleaned.get("translation")
+        if isinstance(translation, str):
+            value = first.group(1)
+            alternatives = {value, str(int(value))}
+            prefix = r"^\s*(?:" + "|".join(map(re.escape, alternatives)) + r")(?=\s|[\u3400-\u9fff])\s*"
+            cleaned["translation"] = re.sub(prefix, "", translation, count=1)
+    translation = cleaned.get("translation")
+    if isinstance(translation, str):
+        # A translated margin marker inside prose has no reliable alignment to
+        # Chinese words. Keep it as a labelled prior result instead of deleting
+        # a possibly meaningful value or presenting contaminated text as final.
+        values = {variant for value, _ in markers for variant in (value, str(int(value)))}
+        if any(re.search(r"(?<![A-Za-z0-9_.])" + re.escape(value) + r"(?![A-Za-z0-9_.])", translation) for value in values):
+            cleaned["_review_line_number_residue"] = True
+    return cleaned
+
+
 def _part(paragraph: dict) -> dict:
     return {"id": paragraph["id"], "text": paragraph.get("text", ""),
             "translation": paragraph["translation"]}
@@ -135,10 +185,12 @@ def review_saved_translation(paragraph: dict, history: list[dict] | None = None,
     text = paragraph.get("translation")
     if not text:
         return None
+    if paragraph.get("_review_line_number_residue"):
+        return {"reason": "review-line-number-residue", "parts": [_part(paragraph)]}
     if response_issue(text, _source(paragraph)):
         return {"reason": "model-requested-source", "parts": []}
     protected = re.findall(r"⟦FOLIO_MATH_\d+⟧", str((target or paragraph).get("translation_text") or ""))
-    if protected and Counter(protected) != Counter(re.findall(r"⟦FOLIO_MATH_\d+⟧", text)):
+    if Counter(protected) != Counter(re.findall(r"⟦FOLIO_MATH_\d+⟧", text)):
         return {"reason": "protected-math-source", "parts": []}
     previous = _legacy_composition(paragraph, history or [])
     if previous:
@@ -172,7 +224,9 @@ def reflow_paper(old: dict, parsed: dict, positions: dict | None = None) -> dict
     result.pop("figures_error", None)
 
     records, exact = [], defaultdict(list)
+    removed_line_numbers = parsed.get("removed_line_numbers") or []
     for index, paragraph in enumerate(old["paragraphs"]):
+        paragraph = _without_review_line_numbers(paragraph, removed_line_numbers, positions)
         item = {"paragraph": paragraph, "index": index, "normal": _normal(_source(paragraph)),
                 "box": _box(positions.get(paragraph["id"])) or _box(paragraph.get("bbox")),
                 "review": review_saved_translation(paragraph, old.get("translation_history") or [])}
