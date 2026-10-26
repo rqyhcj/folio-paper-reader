@@ -17,12 +17,13 @@ import fitz
 
 from .pdf_runtime import synchronized_pdf
 from .math_recovery import _span_text, annotate_page_math, expand_equation_source, keep_span_characters, recover_paragraph
+from .reading_structure import extract_structures, stitch_sentences
 
 
 MAX_PAGES = 500
 MAX_TEXT_CHARS = 3_000_000
 MAX_PARAGRAPH_CHARS = 4500
-PARSE_VERSION = 6
+PARSE_VERSION = 8
 
 
 class PDFExtractionError(ValueError):
@@ -48,6 +49,7 @@ class _Line:
     equation: bool = False
     spans: list[dict] = field(default_factory=list)
     inline_region: int | None = None
+    structured: dict | None = None
 
 
 _LIGATURES = str.maketrans({
@@ -618,7 +620,7 @@ def _column_split(lines: list[_Line], body_size: float) -> float | None:
     if not lines:
         return None
     width = lines[0].width
-    prose = [line for line in lines if len(line.text) >= 22 and line.size >= body_size * 0.8
+    prose = [line for line in lines if not line.structured and len(line.text) >= 22 and line.size >= body_size * 0.8
              and width * .20 < line.x1 - line.x0 < width * 0.60 and not line.equation
              # Right-aligned pseudocode comments are a second text box, not
              # the beginning of another prose column.
@@ -691,7 +693,7 @@ def _reading_order(lines: list[_Line], body_size: float) -> list[_Line]:
 
 def _heading_level(line: _Line, body_size: float) -> int | None:
     text = line.text.strip()
-    if line.equation:
+    if line.equation or line.structured:
         return None
     # Bold table cells and chart tick values are not section titles.
     if not any(char.isalpha() for char in text):
@@ -700,6 +702,8 @@ def _heading_level(line: _Line, body_size: float) -> int | None:
         return None
     # Captions and list entries should remain prose even when bold.
     if re.match(r"^(?:figure|fig\.?|table|equation|algorithm)\s*\d", text, re.I):
+        return None
+    if re.match(r"^[•●▪▷▹]", text):
         return None
     if _COMMON_HEADINGS.fullmatch(text):
         return 1
@@ -714,6 +718,14 @@ def _heading_level(line: _Line, body_size: float) -> int | None:
     if line.size >= body_size * 1.22 and not text.endswith((".", ";", ",")):
         return 1 if line.size >= body_size * 1.5 else 2
     if line.bold and len(text) < 110 and not text.endswith((".", ";", ",", ":")):
+        # Bold lead-ins and wrapped emphasis are part of a sentence. A broken
+        # word or lower-case continuation cannot become a standalone section.
+        if text.endswith("-") or re.match(r"^[a-z]", text):
+            return None
+        if line.size <= body_size * 1.1 and re.search(r"[a-z0-9][.!?]\s+[A-Z]", text):
+            # A body-sized bold lead-in can share a PDF line with the start
+            # of the next sentence. Do not turn that line into a heading.
+            return None
         if numbered:
             return min(numbered.group(1).count(".") + 1, 6)
         if len(text.split()) <= 12:
@@ -740,13 +752,18 @@ def _join_lines(texts: list[str]) -> str:
     return joined.replace("\u00ad", "").strip()
 
 
-def _assemble_page(lines: list[_Line], body_size: float) -> list[dict]:
+def _assemble_page(lines: list[_Line], body_size: float, structures: list[dict] | None = None) -> list[dict]:
     paragraphs = []
     group: list[_Line] = []
     group_level: int | None = None
     group_equation = False
     lines = _merge_equation_regions(lines, body_size)
     lines = _mark_inline_regions(_attach_inline_math_fragments(lines, body_size), body_size)
+    for block in structures or []:
+        x0, y0, x1, y1 = block["bbox"]
+        lines.append(_Line(block["text"], x0, y0, x1, y1, body_size, False, -1,
+                           block["page"], block["page_width"], block["page_height"],
+                           baseline=y1, structured=block))
     ordered = _reading_order(lines, body_size)
     flow_right: dict[str, float] = defaultdict(float)
     for line in ordered:
@@ -766,13 +783,18 @@ def _assemble_page(lines: list[_Line], body_size: float) -> list[dict]:
                                         round(min(line.y0 for line in group), 3),
                                         round(max(line.x1 for line in group), 3),
                                         round(max(line.y1 for line in group), 3)],
-                               "page_width": group[0].width, "page_height": group[0].height}
+                               "page_width": group[0].width, "page_height": group[0].height,
+                               "_first_flow": group[0].flow, "_last_flow": group[-1].flow}
             paragraph = recover_paragraph(paragraph, group)
             expand_equation_source(paragraph, group, ordered, body_size)
             paragraphs.append(paragraph)
         group = []
 
     for line in ordered:
+        if line.structured:
+            flush()
+            paragraphs.append(line.structured)
+            continue
         level = _heading_level(line, body_size)
         if not group:
             group, group_level, group_equation = [line], level, line.equation
@@ -780,7 +802,9 @@ def _assemble_page(lines: list[_Line], body_size: float) -> list[dict]:
         previous = group[-1]
         gap = line.y0 - previous.y0
         flow_changed = previous.flow != line.flow
-        if (not flow_changed and previous.inline_region is not None
+        if re.match(r"^[•●▪▷▹]\s*", line.text):
+            merge = False
+        elif (not flow_changed and previous.inline_region is not None
                 and previous.inline_region == line.inline_region):
             merge = True
         elif group_equation or line.equation:
@@ -823,13 +847,24 @@ def _assemble_page(lines: list[_Line], body_size: float) -> list[dict]:
 
 
 def _chunk_paragraph(paragraph: dict) -> list[dict]:
+    if paragraph.get("kind") in {"algorithm", "table", "equation"} or paragraph.get("inline_math"):
+        return [paragraph]
     remaining = paragraph["text"]
     result = []
     while len(remaining) > MAX_PARAGRAPH_CHARS:
         window = remaining[:MAX_PARAGRAPH_CHARS + 1]
         candidates = [match.end() for match in re.finditer(r"[.!?。！？]\s+", window)
                       if match.end() > MAX_PARAGRAPH_CHARS // 2]
-        cut = candidates[-1] if candidates else window.rfind(" ", MAX_PARAGRAPH_CHARS // 2, MAX_PARAGRAPH_CHARS)
+        if not candidates:
+            # This is a soft target, not a reason to break a sentence or word.
+            # A longer complete sentence remains one translation unit.
+            next_end = re.search(r"[.!?。！？](?:\s+|$)", remaining[MAX_PARAGRAPH_CHARS:])
+            if next_end:
+                cut = MAX_PARAGRAPH_CHARS + next_end.end()
+            else:
+                break
+        else:
+            cut = candidates[-1]
         if cut <= 0:
             cut = MAX_PARAGRAPH_CHARS
         result.append({**paragraph, "text": remaining[:cut].strip()})
@@ -947,11 +982,14 @@ def extract_pdf(data: bytes, filename: str) -> dict:
             raise PDFExtractionError("未检测到可选择的文字。这可能是扫描版 PDF；本程序暂不支持 OCR，请导入带文字层的 PDF。")
         body_size = _body_size(pages)
         paragraphs = []
-        for lines in pages:
-            for paragraph in _assemble_page(lines, body_size):
-                for chunk in _chunk_paragraph(paragraph):
-                    paragraphs.append({**chunk, "id": f"p-{len(paragraphs) + 1}",
-                                       "translation": None, "error": None, "section_id": ""})
+        assembled = []
+        for index, lines in enumerate(pages):
+            structures, consumed = extract_structures(document[index], lines, body_size)
+            assembled.extend(_assemble_page([line for line in lines if id(line) not in consumed], body_size, structures))
+        for paragraph in stitch_sentences(assembled, body_size):
+            for chunk in _chunk_paragraph(paragraph):
+                paragraphs.append({**chunk, "id": f"p-{len(paragraphs) + 1}",
+                                   "translation": None, "error": None, "section_id": ""})
         if not paragraphs:
             raise PDFExtractionError("未提取到可读取的正文，请确认 PDF 包含文字层。")
         warnings = []

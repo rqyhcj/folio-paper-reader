@@ -15,6 +15,7 @@ import fitz
 from .pdf_runtime import synchronized_pdf
 from .inline_math_export import TOKEN, slots, text_with_math
 from .math_typeset import split_math, render_formula
+from .structured_content import rows_for
 
 
 PAGE_WIDTH, PAGE_HEIGHT = fitz.paper_size("a4")
@@ -67,6 +68,47 @@ def _wrap(text: str, font: fitz.Font, size: float, width: float) -> list[str]:
     return lines
 
 
+def _cell_lines(text, font, size, width, color):
+    """Wrap table cells without splitting a delimited formula or CJK word run."""
+    lines, current, used, height = [], "", 0.0, 17.0
+
+    def append(token, advance, extent=17):
+        nonlocal current, used, height
+        if current and used + advance > width:
+            lines.append((current.rstrip(), height))
+            current, used, height = "", 0.0, 17.0
+        if not current and token.isspace():
+            return
+        current += token
+        used += advance
+        height = max(height, extent)
+
+    for part in split_math(str(text)):
+        if part.math:
+            formula = render_formula(part.text, size, False, tuple(color))
+            if formula:
+                scale = min(1, width / formula.width)
+                append(r"\(" + part.text + r"\)", formula.width * scale, formula.height * scale + 3)
+                continue
+            value = "[公式未能排版]"
+        else:
+            value = part.text
+        for token in re.findall(r"\n|[^\S\n]+|[\u3400-\u9fff]|[^\s\u3400-\u9fff]+", value):
+            if token == "\n":
+                lines.append((current.rstrip(), height))
+                current, used, height = "", 0.0, 17.0
+                continue
+            advance = font.text_length(token, fontsize=size)
+            if advance > width:
+                for char in token:
+                    append(char, font.text_length(char, fontsize=size))
+            else:
+                append(token, advance)
+    if current or not lines:
+        lines.append((current.rstrip(), height))
+    return lines
+
+
 class _Layout:
     def __init__(self, document: fitz.Document, math_sources: ExitStack):
         self.document = document
@@ -98,13 +140,13 @@ class _Layout:
         self.page.show_pdf_page(rect, source, 0)
 
     def text(self, value: str, *, font: fitz.Font | None = None, size=11.2,
-             leading=18.0, color=INK, after=0.0):
+             leading=18.0, color=INK, after=0.0, left=MARGIN, width=BODY_WIDTH):
         font = font or self.cjk
         parts = split_math(value)
         if any(part.math for part in parts):
-            self.math_text(parts, font=font, size=size, leading=leading, color=color, after=after)
+            self.math_text(parts, font=font, size=size, leading=leading, color=color, after=after, left=left, width=width)
             return
-        lines = _wrap(value, font, size, BODY_WIDTH)
+        lines = _wrap(value, font, size, width)
         writer = fitz.TextWriter(self.page.rect)
         has_text = False
         for line in lines:
@@ -115,7 +157,7 @@ class _Layout:
                 writer = fitz.TextWriter(self.page.rect)
                 has_text = False
             if line:
-                writer.append((MARGIN, self.y + font.ascender * size), line,
+                writer.append((left, self.y + font.ascender * size), line,
                               font=font, fontsize=size)
                 has_text = True
             self.y += leading
@@ -123,7 +165,7 @@ class _Layout:
             writer.write_text(self.page, color=color)
         self.y += after
 
-    def math_text(self, parts, *, font, size, leading, color, after):
+    def math_text(self, parts, *, font, size, leading, color, after, left=MARGIN, width=BODY_WIDTH):
         """Wrap prose and atomic formula boxes on a shared, measured baseline."""
         runs = []
         used = 0.0
@@ -145,7 +187,7 @@ class _Layout:
             baseline = self.y + ascent
             writer = fitz.TextWriter(self.page.rect)
             text_pending = False
-            x = MARGIN
+            x = left
             buffered = ""
             buffer_x = x
             for kind, content, width, up, down in runs:
@@ -168,14 +210,14 @@ class _Layout:
             self.y += height
             runs, used = [], 0.0
 
-        def add(kind, content, width, up=0.0, down=0.0):
+        def add(kind, content, run_width, up=0.0, down=0.0):
             nonlocal used
-            if runs and used + width > BODY_WIDTH:
+            if runs and used + run_width > width:
                 flush()
             if kind == "space" and not runs:
                 return
-            runs.append((kind, content, width, up, down))
-            used += width
+            runs.append((kind, content, run_width, up, down))
+            used += run_width
 
         for part in parts:
             if part.math:
@@ -184,20 +226,21 @@ class _Layout:
                     # Preserve an explicit, readable failure rather than printing
                     # unsupported commands as though they were a valid formula.
                     notice = "〔公式未能排版，请查看原 PDF〕"
-                    add("text", notice, font.text_length(notice, fontsize=size))
+                    for char in notice:
+                        add("text", char, font.text_length(char, fontsize=size))
                     continue
-                scale = min(1.0, BODY_WIDTH / formula.width,
+                scale = min(1.0, width / formula.width,
                             (BODY_BOTTOM - BODY_TOP - 10) / formula.height)
-                width, height = formula.width * scale, formula.height * scale
+                formula_width, height = formula.width * scale, formula.height * scale
                 ascent, descent = formula.ascent * scale, formula.descent * scale
                 if part.display:
                     flush()
                     self.ensure(height + 10)
-                    x = MARGIN + (BODY_WIDTH - width) / 2
-                    self.formula(formula, fitz.Rect(x, self.y + 3, x + width, self.y + 3 + height))
+                    x = left + (width - formula_width) / 2
+                    self.formula(formula, fitz.Rect(x, self.y + 3, x + formula_width, self.y + 3 + height))
                     self.y += height + 10
                 else:
-                    add("formula", formula, width, ascent, descent)
+                    add("formula", formula, formula_width, ascent, descent)
                 continue
             for token in re.findall(r"\n|[^\S\n]+|[^\s]+", part.text.expandtabs(4)):
                 if token == "\n":
@@ -205,14 +248,58 @@ class _Layout:
                 elif token.isspace():
                     add("space", " ", font.text_length(" ", fontsize=size))
                 else:
-                    width = font.text_length(token, fontsize=size)
-                    if width > BODY_WIDTH or re.search(r"[\u3400-\u9fff]", token):
+                    token_width = font.text_length(token, fontsize=size)
+                    if token_width > width or re.search(r"[\u3400-\u9fff]", token):
                         for char in token:
                             add("text", char, font.text_length(char, fontsize=size))
                     else:
-                        add("text", token, width)
+                        add("text", token, token_width)
         flush()
         self.y += after
+
+    def structure(self, paragraph, *, translated=False):
+        rows = rows_for(paragraph, translated)
+        if not rows:
+            return
+        color = TRANSLATION if translated else INK
+        if paragraph["kind"] == "algorithm":
+            lines = paragraph.get("translated_algorithm_lines" if translated else "algorithm_lines")
+            self.ensure(38)
+            self.page.draw_line((MARGIN, self.y), (MARGIN + BODY_WIDTH, self.y), color=MUTED, width=.6)
+            self.y += 7
+            for item in lines:
+                indent = min(20, max(0, int(item.get("indent", 0)))) * 10
+                self.text(str(item.get("text", "")), font=self.cjk if translated else self.english,
+                          size=10.3, leading=16, color=color, left=MARGIN + indent, width=BODY_WIDTH-indent)
+            # A step may finish exactly at the body boundary after a page break.
+            # Keep its closing rule on that page without adding an empty page.
+            self.y = min(self.y + 5, BODY_BOTTOM)
+            self.page.draw_line((MARGIN, self.y), (MARGIN + BODY_WIDTH, self.y), color=MUTED, width=.6)
+            self.y += 14
+            return
+        columns = max(map(len, rows))
+        if not columns:
+            return
+        cell_width = BODY_WIDTH / columns
+        font, size = self.cjk if translated else self.english, min(9.2, max(3.5, cell_width / 8))
+        padding = min(6, cell_width * .1)
+        for row in rows:
+            cells = [_cell_lines(cell, font, size, cell_width - padding * 2, color) for cell in row]
+            count = max([1] + [len(cell) for cell in cells])
+            for index in range(count):
+                height = max([17] + [cell[index][1] for cell in cells if index < len(cell)]) + 8
+                self.ensure(height)
+                top = self.y
+                for column in range(columns):
+                    left = MARGIN + column * cell_width
+                    self.page.draw_rect(fitz.Rect(left, top, left + cell_width, top + height),
+                                        color=(.78, .82, .82), width=.35)
+                    if column < len(cells) and index < len(cells[column]):
+                        self.y = top + 4
+                        self.text(cells[column][index][0], font=font, size=size, leading=17,
+                                  color=color, left=left + padding, width=cell_width - padding * 2)
+                self.y = top + height
+        self.y += 16
 
     def figure(self, figure: dict, path: Path):
         # Use actual decoded dimensions, not untrusted stored width/height.
@@ -298,9 +385,11 @@ def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None,
             return text_with_math(paragraph, value)
 
         def insert_inline_math(paragraph):
-            translation = paragraph.get("translation") or ""
+            referenced = paragraph.get("translation") or ""
+            if paragraph.get("math_status") == "source-inline":
+                referenced += paragraph.get("translation_text") or ""
             for placeholder, item in slots(paragraph).items():
-                if placeholder not in translation or item.get("latex"):
+                if placeholder not in referenced or item.get("latex"):
                     continue
                 number = TOKEN.fullmatch(placeholder).group(1)
                 layout.text(f"〔原式{number}〕", size=9, leading=14, color=MUTED, after=4)
@@ -337,6 +426,14 @@ def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None,
             if paragraph.get("id") in figure_labels:
                 insert_figures(after_paragraph.get(str(paragraph.get("id") or ""), []))
                 continue
+            if rows_for(paragraph):
+                layout.structure(paragraph)
+                if rows_for(paragraph, True):
+                    layout.structure(paragraph, translated=True)
+                else:
+                    layout.text(translation_text(paragraph), size=10.5, leading=18.5, color=TRANSLATION, after=19)
+                insert_figures(after_paragraph.get(str(paragraph.get("id") or ""), []))
+                continue
             if paragraph.get("kind") == "equation" or paragraph.get("math_status") == "source-image":
                 if paragraph.get("math_status") == "source-image":
                     path = equation_paths.get(paragraph.get("id"))
@@ -354,7 +451,9 @@ def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None,
                 insert_figures(after_paragraph.get(str(paragraph.get("id") or ""), []))
                 continue
             heading = paragraph.get("kind") == "heading"
-            source = _clean(paragraph.get("text"))
+            source = _clean(paragraph.get("translation_text") if paragraph.get("math_status") == "source-inline" else paragraph.get("text"))
+            if paragraph.get("math_status") == "source-inline":
+                source = text_with_math(paragraph, source)
             translated = translation_text(paragraph)
             english_size, english_leading = (14.0, 21.0) if heading else (11.2, 18.0)
             chinese_size, chinese_leading = (12.2, 20.0) if heading else (10.5, 18.5)

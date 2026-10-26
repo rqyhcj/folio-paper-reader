@@ -11,6 +11,7 @@ const state = {
   bilingual: true, readMode: 'bilingual', originalPage: 1, originalPaperId: null, originalScrollFrame: null,
   blocks: new Map(), figures: new Map(), outlineSignature: '', scrollFrame: null,
   readingBlocks: [], outlineItems: [], outlineTargets: [], activeOutline: null,
+  aiDialogPaperId: null, aiRequestPending: false,
 };
 
 function node(tag, className, text) {
@@ -302,18 +303,20 @@ function restoreReparsePosition(position) {
 function displayPaper(paper, fresh = false) {
   const newDocument = state.paper?.id !== paper.id;
   const wasDemo = state.paper?.id === paper.id && state.paper?.is_demo;
-  const reparsed = !fresh && !newDocument && Number(paper.parse_version || 0) > Number(state.paper?.parse_version || 0);
+  const reparsed = !fresh && !newDocument && (Number(paper.parse_version || 0) > Number(state.paper?.parse_version || 0)
+    || Number(paper.ai_layout_revision || 0) !== Number(state.paper?.ai_layout_revision || 0));
   const readingPosition = reparsed ? captureReparsePosition() : null;
   state.paper = paper;
   if (wasDemo) state.paper.is_demo = true;
   const signatures = {
     metadata: JSON.stringify([paper.id, paper.title, paper.filename, paper.created_at,
       paper.page_count, paper.paragraph_count, paper.source_format, paper.is_demo, paper.warnings, paper.parse_status, paper.parse_error]),
-    paragraphs: JSON.stringify([paper.id, paper.parse_version, paper.paragraphs, state.search]),
+    paragraphs: JSON.stringify([paper.id, paper.parse_version, paper.ai_layout_revision, paper.paragraphs, state.search]),
     figures: JSON.stringify([paper.id, paper.figures, paper.figures_error]),
     outline: JSON.stringify([paper.id, paper.outline]),
     translation: JSON.stringify([paper.id, paper.status, paper.error, paper.progress,
-      paper.paragraph_count, paper.translated_count, state.bilingual, paper.parse_status, paper.parse_error]),
+      paper.paragraph_count, paper.translated_count, state.bilingual, paper.parse_status, paper.parse_error,
+      paper.ai_layout_status, paper.ai_layout_progress, paper.ai_layout_error]),
     artwork: JSON.stringify([paper.id, paper.figure_status, paper.figure_progress, paper.page_count]),
   };
   const previous = state.displaySignatures || {};
@@ -389,7 +392,8 @@ function displayPaper(paper, fresh = false) {
   state.displaySignatures = signatures;
   schedulePoll();
   if (reparsed && readingPosition) requestAnimationFrame(() => {
-    if (state.paper?.id === paper.id && state.paper?.parse_version === paper.parse_version) restoreReparsePosition(readingPosition);
+    if (state.paper?.id === paper.id && state.paper?.parse_version === paper.parse_version
+        && state.paper?.ai_layout_revision === paper.ai_layout_revision) restoreReparsePosition(readingPosition);
   });
   else if (fresh || changed('paragraphs') || changed('figures')) requestAnimationFrame(updateReadingPosition);
 }
@@ -429,7 +433,11 @@ function paragraphText(element, text) {
 
 function translatedParagraphText(element, text, paragraph) {
   const formulas = Array.isArray(paragraph.inline_math) ? paragraph.inline_math : [];
-  if (!formulas.length) { delete element.dataset.inlineSignature; paragraphText(element, text); return; }
+  if (!formulas.length) {
+    delete element.dataset.inlineSignature;
+    paragraphText(element, text.replace(/⟦FOLIO_MATH_\d+⟧/g, '〔原式缺失，请查看原 PDF〕'));
+    return;
+  }
   const signature = JSON.stringify([state.paper.id, state.paper.parse_version, text, state.search, formulas]);
   if (element.dataset.inlineSignature === signature) return;
   element.dataset.inlineSignature = signature;
@@ -448,7 +456,7 @@ function translatedParagraphText(element, text, paragraph) {
   for (const match of text.matchAll(/⟦FOLIO_MATH_\d+⟧/g)) {
     appendText(text.slice(offset, match.index));
     const formula = byToken.get(match[0]);
-    if (!formula) appendText(match[0]);
+    if (!formula) appendText('〔原式缺失，请查看原 PDF〕');
     else if (typeof formula.latex === 'string' && formula.latex) {
       appendText(`\\(${formula.latex}\\)`);
     } else {
@@ -471,11 +479,71 @@ function translatedParagraphText(element, text, paragraph) {
         image.src = url;
         link.append(image); group.append(link);
       }
+      if (!group.childNodes.length) group.append(document.createTextNode('〔原式缺失，请查看原 PDF〕'));
       element.append(group);
     }
     offset = match.index + match[0].length;
   }
   appendText(text.slice(offset));
+}
+
+function structuredParagraphText(element, paragraph, translated = false) {
+  const algorithm = paragraph.kind === 'algorithm' && Array.isArray(paragraph.algorithm_lines);
+  const table = paragraph.kind === 'table' && Array.isArray(paragraph.table_rows);
+  if (!algorithm && !table) return false;
+  const signature = JSON.stringify([paragraph.kind, paragraph.algorithm_lines, paragraph.table_rows,
+    paragraph.table_header, paragraph.table_header_rows, paragraph.ai_reconstructed, paragraph.needs_visual_review, translated, state.search]);
+  if (element.dataset.structureSignature === signature) return true;
+  element.dataset.structureSignature = signature;
+  delete element.dataset.textSignature;
+  delete element.dataset.inlineSignature;
+  delete element.dataset.equationSignature;
+  delete element.dataset.mathSearchHit;
+  element.replaceChildren();
+  const label = node('div', 'structure-label', `${algorithm ? '算法' : '表格'}${translated ? ' · 中文' : ''}`);
+  if (!translated && paragraph.ai_reconstructed) label.append(node('span', 'structure-ai-note', 'AI 识别 · 可对照原版核查'));
+  else if (!translated && paragraph.needs_visual_review) label.append(node('span', 'structure-ai-note', '部分公式待核对 · 可用 AI 视觉识别补全'));
+  element.append(label);
+  const appendContent = (target, text) => {
+    paragraphText(target, String(text ?? ''));
+    if (target.dataset.mathSearchHit) element.dataset.mathSearchHit = 'true';
+  };
+  if (algorithm) {
+    const listing = node('div', 'algorithm-listing');
+    listing.setAttribute('role', 'group');
+    listing.setAttribute('aria-label', '算法步骤与缩进');
+    for (const entry of paragraph.algorithm_lines) {
+      const row = node('div', 'algorithm-line');
+      const value = typeof entry === 'string' ? entry : entry?.text;
+      const indent = Math.min(16, Math.max(0, Number(entry?.indent) || 0));
+      row.style.paddingInlineStart = `${indent * 1.4}em`;
+      appendContent(row, value);
+      listing.append(row);
+    }
+    element.append(listing);
+  } else {
+    const viewport = node('div', 'table-scroll');
+    viewport.tabIndex = 0;
+    viewport.setAttribute('role', 'region');
+    viewport.setAttribute('aria-label', '论文表格，可横向滚动');
+    const grid = node('table', 'paper-data-table');
+    const body = node('tbody');
+    const headerRows = Math.max(0, Math.min(paragraph.table_rows.length,
+      Math.floor(Number(paragraph.table_header_rows) || (paragraph.table_header ? 1 : 0))));
+    for (const [index, cells] of paragraph.table_rows.entries()) {
+      if (!Array.isArray(cells)) continue;
+      const row = node('tr');
+      for (const value of cells) {
+        const cell = node(index < headerRows ? 'th' : 'td');
+        if (index < headerRows) cell.setAttribute('scope', 'col');
+        appendContent(cell, value);
+        row.append(cell);
+      }
+      body.append(row);
+    }
+    grid.append(body); viewport.append(grid); element.append(viewport);
+  }
+  return true;
 }
 
 function renderParagraphs(force = false) {
@@ -513,18 +581,31 @@ function renderParagraphs(force = false) {
     const retainedParts = !translation && Array.isArray(paragraph.previous_translation_parts)
       ? paragraph.previous_translation_parts.filter((part) => typeof part.translation === 'string' && part.translation.trim()) : [];
     const review = paragraph.translation_review_reason;
-    const signature = JSON.stringify([text, translation, paragraph.error, state.search, paragraph.math_status, paragraph.equation_image, paragraph.equation_source, paragraph.inline_math, review, retainedParts]);
+    const signature = JSON.stringify([text, paragraph.translation_text, translation, paragraph.error, state.search, paragraph.kind,
+      paragraph.algorithm_lines, paragraph.table_rows, paragraph.translated_algorithm_lines, paragraph.translated_table_rows,
+      paragraph.table_header, paragraph.table_header_rows, paragraph.ai_reconstructed, paragraph.needs_visual_review,
+      paragraph.math_status, paragraph.equation_image, paragraph.equation_source, paragraph.inline_math, review, retainedParts]);
     if (!force && block.dataset.signature === signature) continue;
     block.dataset.signature = signature;
+    block.classList.toggle('is-algorithm', paragraph.kind === 'algorithm');
+    block.classList.toggle('is-table', paragraph.kind === 'table');
     const original = block.querySelector('.paragraph-original');
-    const sourceEquation = paragraph.math_status === 'source-image' && paragraph.equation_image;
+    const structured = structuredParagraphText(original, paragraph);
+    if (!structured) delete original.dataset.structureSignature;
+    const sourceEquation = !structured && paragraph.math_status === 'source-image' && paragraph.equation_image;
     original.classList.toggle('has-equation-source', !!sourceEquation);
     if (sourceEquation) renderEquationSource(original, paragraph);
-    else {
+    else if (!structured) {
+      delete original.dataset.structureSignature;
       delete original.dataset.equationSignature;
-      paragraphText(original, text);
+      if (paragraph.math_status === 'source-inline' && typeof paragraph.translation_text === 'string') {
+        translatedParagraphText(original, paragraph.translation_text, paragraph);
+      } else {
+        delete original.dataset.inlineSignature;
+        paragraphText(original, text);
+      }
       if (paragraph.math_status === 'latex' && paragraph.equation_source && !original.querySelector('.equation-original-link')) {
-        const source = node('a', 'equation-original-link', '查看原式 ↗');
+        const source = node('a', 'equation-original-link', paragraph.ai_reconstructed ? 'AI 识别 · 对照原式 ↗' : '查看原式 ↗');
         source.href = `/api/papers/${encodeURIComponent(state.paper.id)}/equations/${encodeURIComponent(paragraph.id)}.png`;
         source.target = '_blank';
         source.rel = 'noopener';
@@ -536,8 +617,16 @@ function renderParagraphs(force = false) {
     target.hidden = !translation && !paragraph.error && !retainedParts.length && !review;
     block.classList.toggle('has-translation', !!translation || retainedParts.length > 0 || !!review);
     block.classList.toggle('has-translation-error', !!paragraph.error && !translation);
-    if (translation) translatedParagraphText(target, translation, paragraph);
+    if (translation) {
+      const structuredTranslation = { ...paragraph, algorithm_lines: paragraph.translated_algorithm_lines,
+        table_rows: paragraph.translated_table_rows };
+      if (!structuredParagraphText(target, structuredTranslation, true)) {
+        delete target.dataset.structureSignature;
+        translatedParagraphText(target, translation, paragraph);
+      }
+    }
     else if (retainedParts.length || review) {
+      delete target.dataset.structureSignature;
       delete target.dataset.textSignature;
       delete target.dataset.mathSearchHit;
       target.classList.add('partial');
@@ -557,6 +646,7 @@ function renderParagraphs(force = false) {
       target.append(retry);
     }
     else if (paragraph.error) {
+      delete target.dataset.structureSignature;
       delete target.dataset.textSignature;
       delete target.dataset.mathSearchHit;
       delete target.dataset.inlineSignature;
@@ -569,6 +659,7 @@ function renderParagraphs(force = false) {
       retry.addEventListener('click', () => retryParagraph(paragraph.id, retry));
       target.append(retry);
     } else {
+      delete target.dataset.structureSignature;
       delete target.dataset.textSignature;
       delete target.dataset.mathSearchHit;
       delete target.dataset.inlineSignature;
@@ -586,6 +677,7 @@ function renderEquationSource(element, paragraph) {
   const signature = JSON.stringify([state.paper.id, state.paper.parse_version, paragraph.id, paragraph.text, paragraph.equation_image, paragraph.equation_source, paragraph.ambiguous_inline_math]);
   if (element.dataset.equationSignature === signature) return;
   element.dataset.equationSignature = signature;
+  delete element.dataset.inlineSignature;
   delete element.dataset.textSignature;
   delete element.dataset.mathSearchHit;
   element.replaceChildren();
@@ -805,6 +897,8 @@ function renderTranslationStatus() {
   const failed = paper.progress?.failed ?? paragraphs.filter((p) => !!p.error && !p.translation).length;
   const noTextToTranslate = total === 0 && paragraphs.length > 0;
   const updating = ['updating', 'pending'].includes(paper.parse_status);
+  const aiRunning = paper.ai_layout_status === 'running';
+  const layoutBusy = updating || aiRunning;
   const updateFailed = paper.parse_status === 'error';
   const running = paper.status === 'translating';
   const paused = paper.status === 'paused';
@@ -817,21 +911,41 @@ function renderTranslationStatus() {
   $('translation-detail').textContent = updating && running ? '可暂停翻译后更新排版 · 已保存译文保留，可继续阅读' : updating ? '本地更新中 · 已保存译文保留，可继续阅读' : updateFailed ? '已保留原文与全部译文，可继续阅读或打开原版核对' : `${done} / ${total} 段${failed ? ` · ${failed} 段未成功` : running ? ' · 可随时阅读已完成的部分' : ''}`;
   $('translation-detail').title = paper.parse_error || paper.error || '';
   $('translation-progress').style.width = `${Math.min(100, total ? done / total * 100 : 0)}%`;
-  $('retry-failed').hidden = !failed || running || updating;
+  $('retry-failed').hidden = !failed || running || layoutBusy;
   const button = $('translate-button');
-  button.innerHTML = `${icon(running ? 'pause' : completed || noTextToTranslate ? 'check' : 'spark')}<span>${running ? '暂停翻译' : updating ? '更新排版中' : noTextToTranslate ? '无需翻译' : completed ? '翻译完成' : paused || done ? '继续翻译' : '全文翻译'}</span>`;
-  button.disabled = updating ? !running : noTextToTranslate || completed && !failed;
-  button.title = running ? '暂停后会保留已完成的译文' : updating ? '本地排版更新完成后即可继续翻译，已保存译文会保留' : noTextToTranslate ? '当前文稿没有需要翻译的正文段落' : completed ? '所有正文段落均已完成翻译' : '用当前配置的模型逐段翻译';
-  $('reader-help').hidden = updating || noTextToTranslate || running || done > 0 || !!paper.error || !!failed || !state.bilingual;
+  button.innerHTML = `${icon(running ? 'pause' : completed || noTextToTranslate ? 'check' : 'spark')}<span>${running ? '暂停翻译' : aiRunning ? 'AI 整理中' : updating ? '更新排版中' : noTextToTranslate ? '无需翻译' : completed ? '翻译完成' : paused || done ? '继续翻译' : '全文翻译'}</span>`;
+  button.disabled = layoutBusy ? !running : noTextToTranslate || completed && !failed;
+  button.title = running ? '暂停后会保留已完成的译文' : layoutBusy ? '整理完成后即可继续翻译，已保存译文会保留' : noTextToTranslate ? '当前文稿没有需要翻译的正文段落' : completed ? '所有正文段落均已完成翻译' : '用当前配置的模型逐段翻译';
+  $('reader-help').hidden = layoutBusy || noTextToTranslate || running || done > 0 || !!paper.error || !!failed || !state.bilingual;
   for (const retry of document.querySelectorAll('#paragraphs .paragraph-translation button')) {
-    if (updating && !retry.disabled) {
+    if (layoutBusy && !retry.disabled) {
       retry.dataset.parseBlocked = 'true';
       retry.disabled = true;
-    } else if (!updating && retry.dataset.parseBlocked) {
+    } else if (!layoutBusy && retry.dataset.parseBlocked) {
       delete retry.dataset.parseBlocked;
       retry.disabled = false;
     }
   }
+  const aiAction = $('ai-layout-button');
+  aiAction.hidden = !isPdfPaper(paper) || isDemo(paper);
+  aiAction.disabled = layoutBusy || running;
+  aiAction.title = running ? '请先暂停翻译，再整理段落、算法和表格' : layoutBusy ? '正在整理，已完成部分可继续阅读' : '让当前 API 辅助整理段落，或识别公式、算法与表格';
+  const aiStatus = paper.ai_layout_status;
+  const aiError = aiStatus === 'error';
+  const aiPaused = aiStatus === 'paused';
+  const aiBanner = $('ai-layout-banner');
+  aiBanner.hidden = !aiRunning && !aiError && !aiPaused;
+  aiBanner.classList.toggle('has-error', aiError);
+  aiBanner.classList.toggle('running', aiRunning);
+  const progress = paper.ai_layout_progress || {};
+  const page = Math.max(1, Number(progress.page) || 1);
+  const totalPages = Math.max(0, Number(progress.total) || 0);
+  const finishedPages = Math.min(totalPages, Math.max(0, Number(progress.done) || 0));
+  $('ai-layout-status').textContent = aiRunning ? `AI 正在整理第 ${page} 页` : aiPaused ? 'AI 整理已暂停' : aiError ? 'AI 整理暂未完成' : '';
+  $('ai-layout-detail').textContent = aiError ? (paper.ai_layout_error || '当前页识别未通过，已完成部分已保留，可重新选择范围重试。')
+    : `${finishedPages} / ${totalPages} 页 · ${aiPaused ? '已完成部分已保存，可重新选择剩余范围' : '可继续阅读已完成部分'}`;
+  $('ai-layout-pause').hidden = !aiRunning;
+  $('ai-layout-pause').disabled = !!state.aiRequestPending;
 }
 
 function renderFigureStatus() {
@@ -846,19 +960,120 @@ function renderFigureStatus() {
   badge.title = '正文和翻译可正常阅读；原版 PDF 随时可查看完整图片与公式。';
 }
 
+function updateAiLayoutDescription() {
+  const vision = $('ai-mode-vision').checked;
+  const all = $('ai-layout-scope').value === 'all';
+  const page = Math.max(1, Number($('ai-layout-page').value) || 1);
+  $('ai-layout-page').disabled = all || state.aiRequestPending;
+  const scope = all ? `整篇论文（${state.paper?.page_count || 0} 页）` : `第 ${page} 页`;
+  $('ai-layout-privacy').textContent = `点击开始后，${scope}的${vision ? '页面图像和文字' : '提取文字'}将发送到当前配置的 API，按服务商规则计费。${vision ? '请使用支持图片输入的模型；识别后的公式、算法和表格可对照原版核查。' : '文本整理用于调整段落边界；复杂公式和图表可选择视觉识别。'}`;
+  $('ai-layout-submit').textContent = $('ai-layout-translate').checked ? '开始整理并翻译' : '开始整理';
+}
+
+function openAiLayout() {
+  const paper = state.paper;
+  if (!paper || !isPdfPaper(paper) || isDemo(paper)) return;
+  if (paper.ai_layout_status === 'running' || ['updating', 'pending'].includes(paper.parse_status)) return;
+  if (paper.status === 'translating') { toast('请先暂停翻译，再整理段落、算法和表格。'); return; }
+  if (!isModelConfigured()) {
+    openSettings();
+    settingsMessage('请先配置用于整理和翻译的 API，再点击「AI 整理」。');
+    return;
+  }
+  state.aiDialogPaperId = paper.id;
+  const position = state.readMode === 'pdf' ? state.originalPage : captureReparsePosition()?.page;
+  const page = Math.max(1, Math.min(Number(paper.page_count) || 1, Number(position) || 1));
+  $('ai-layout-document').textContent = paper.title || paper.filename || '当前论文';
+  const provider = state.providers?.find((item) => item.id === state.settings?.provider)?.name || '当前 API 服务';
+  $('ai-layout-service').textContent = `${provider} · ${state.settings?.model || ''}`;
+  $('ai-layout-model').value = '';
+  $('ai-layout-model').placeholder = state.settings?.model || '使用当前配置的模型';
+  $('ai-layout-scope').value = 'page';
+  $('ai-layout-page').value = String(page);
+  $('ai-layout-page').max = String(Math.max(1, Number(paper.page_count) || 1));
+  $('ai-mode-text').checked = true;
+  $('ai-mode-vision').checked = false;
+  $('ai-layout-translate').checked = true;
+  $('ai-layout-message').hidden = true;
+  setAiLayoutBusy(false);
+  updateAiLayoutDescription();
+  $('ai-layout-dialog').showModal();
+}
+
+function setAiLayoutBusy(busy) {
+  state.aiRequestPending = busy;
+  for (const id of ['ai-mode-text', 'ai-mode-vision', 'ai-layout-scope', 'ai-layout-model',
+    'ai-layout-translate', 'ai-layout-submit', 'ai-layout-close', 'ai-layout-cancel']) $(id).disabled = busy;
+  $('ai-layout-page').disabled = busy || $('ai-layout-scope').value === 'all';
+}
+
+async function startAiLayout(event) {
+  event.preventDefault();
+  if (state.aiRequestPending || !$('ai-layout-form').reportValidity()) return;
+  const id = state.aiDialogPaperId;
+  if (!id || state.paper?.id !== id) { $('ai-layout-dialog').close(); return; }
+  if (state.paper.status === 'translating' || state.paper.ai_layout_status === 'running'
+      || ['updating', 'pending'].includes(state.paper.parse_status)) return;
+  const payload = {
+    scope: $('ai-layout-scope').value === 'all' ? 'all' : 'page',
+    page: Math.max(1, Math.min(Number(state.paper.page_count) || 1, Number($('ai-layout-page').value) || 1)),
+    vision: $('ai-mode-vision').checked,
+    translate_after: $('ai-layout-translate').checked,
+  };
+  const model = $('ai-layout-model').value.trim();
+  if (model) payload.model = model;
+  setAiLayoutBusy(true);
+  $('ai-layout-message').hidden = true;
+  try {
+    const result = await api(`/papers/${encodeURIComponent(id)}/analyze`, { method: 'POST', body: JSON.stringify(payload) });
+    $('ai-layout-dialog').close();
+    if (state.paper?.id !== id) return;
+    displayPaper(result.paragraphs ? result : await api(`/papers/${encodeURIComponent(id)}`));
+    toast('AI 整理已开始，已完成的页面会逐页更新。');
+  } catch (error) {
+    $('ai-layout-message').textContent = error.message;
+    $('ai-layout-message').hidden = false;
+  } finally {
+    setAiLayoutBusy(false);
+    if (state.paper?.id === id) renderTranslationStatus();
+  }
+}
+
+async function pauseAiLayout() {
+  if (state.aiRequestPending || state.paper?.ai_layout_status !== 'running') return;
+  const id = state.paper.id;
+  state.aiRequestPending = true;
+  $('ai-layout-pause').disabled = true;
+  $('ai-layout-pause').textContent = '正在暂停…';
+  try {
+    const result = await api(`/papers/${encodeURIComponent(id)}/analyze/pause`, { method: 'POST', body: '{}' });
+    if (state.paper?.id !== id) return;
+    displayPaper(result.paragraphs ? result : await api(`/papers/${encodeURIComponent(id)}`));
+    toast('AI 整理已暂停，已完成部分会保留。');
+  } catch (error) { toast(error.message, true); }
+  finally {
+    state.aiRequestPending = false;
+    $('ai-layout-pause').textContent = '暂停整理';
+    if (state.paper?.id === id) renderTranslationStatus();
+  }
+}
+
 function schedulePoll() {
   clearTimeout(state.poll);
   if (state.paper?.status !== 'translating' && !['extracting', 'pending'].includes(state.paper?.figure_status)
-      && !['updating', 'pending'].includes(state.paper?.parse_status)) return;
+      && !['updating', 'pending'].includes(state.paper?.parse_status)
+      && state.paper?.ai_layout_status !== 'running') return;
   const id = state.paper.id;
   state.poll = setTimeout(async () => {
     try {
       const paper = await api(`/papers/${encodeURIComponent(id)}`);
       if (state.paper?.id !== id || state.loading) return;
       const previous = state.paper.status;
+      const previousLayout = state.paper.ai_layout_status;
       displayPaper(paper);
       if (previous === 'translating' && paper.status === 'completed') toast('全文翻译完成，安心读下去。');
       if (previous === 'translating' && paper.status === 'error') toast(paper.error || '翻译暂时遇到问题，已保留完成的译文。', true);
+      if (previousLayout === 'running' && paper.ai_layout_status === 'completed') toast('AI 整理完成，段落、公式与版面已更新。');
     } catch (error) {
       if (state.paper?.id !== id) return;
       toast(error.message, true);
@@ -871,7 +1086,7 @@ async function translatePaper(retry = false) {
   if (!state.paper) return;
   const id = state.paper.id;
   const running = state.paper.status === 'translating' && !retry;
-  if (['updating', 'pending'].includes(state.paper.parse_status) && !running) return;
+  if ((['updating', 'pending'].includes(state.paper.parse_status) || state.paper.ai_layout_status === 'running') && !running) return;
   if (!running && !isModelConfigured()) {
     openSettings();
     settingsMessage('请先选择服务商，自行填写模型和连接信息并保存，然后开始翻译。');
@@ -893,7 +1108,7 @@ async function translatePaper(retry = false) {
 }
 
 async function retryParagraph(id, button) {
-  if (['updating', 'pending'].includes(state.paper?.parse_status)) return;
+  if (['updating', 'pending'].includes(state.paper?.parse_status) || state.paper?.ai_layout_status === 'running') return;
   if (!isModelConfigured()) { openSettings(); return; }
   const paperId = state.paper.id;
   button.disabled = true;
@@ -1451,6 +1666,15 @@ function wireEvents() {
   $('toggle-key').addEventListener('click', () => { const visible = $('api-key').type === 'password'; $('api-key').type = visible ? 'text' : 'password'; $('toggle-key').textContent = visible ? '隐藏' : '显示'; });
   $('clear-key').addEventListener('click', () => { state.keyDirty = true; $('api-key').value = ''; $('api-key').placeholder = '保存后将清除原密钥'; settingsMessage('点击「保存设置」后将清除已保存的密钥。'); });
   $('translate-button').addEventListener('click', () => translatePaper());
+  $('ai-layout-button').addEventListener('click', openAiLayout);
+  $('ai-layout-form').addEventListener('submit', startAiLayout);
+  $('ai-layout-close').addEventListener('click', () => $('ai-layout-dialog').close());
+  $('ai-layout-cancel').addEventListener('click', () => $('ai-layout-dialog').close());
+  $('ai-layout-pause').addEventListener('click', pauseAiLayout);
+  for (const id of ['ai-mode-text', 'ai-mode-vision', 'ai-layout-scope', 'ai-layout-page', 'ai-layout-translate']) {
+    $(id).addEventListener('change', updateAiLayoutDescription);
+  }
+  $('ai-layout-dialog').addEventListener('cancel', (event) => { if (state.aiRequestPending) event.preventDefault(); });
   $('retry-failed').addEventListener('click', () => translatePaper(true));
   $('font-minus').addEventListener('click', () => setFontSize(state.fontSize - 1));
   $('font-plus').addEventListener('click', () => setFontSize(state.fontSize + 1));
@@ -1482,7 +1706,7 @@ function wireEvents() {
   $('reader-scroll').addEventListener('scroll', () => { if (state.scrollFrame) return; state.scrollFrame = requestAnimationFrame(() => { state.scrollFrame = null; updateReadingPosition(); }); }, { passive: true });
   window.addEventListener('resize', updateReadingPosition);
   document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && state.paper && state.readMode !== 'pdf' && !$('settings-dialog').open && !$('confirm-dialog').open) { e.preventDefault(); openSearch(); }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && state.paper && state.readMode !== 'pdf' && !$('settings-dialog').open && !$('confirm-dialog').open && !$('ai-layout-dialog').open) { e.preventDefault(); openSearch(); }
     if (e.key === 'Escape') { $('export-menu').hidden = true; closeSidebar(); if (!$('search-bar').hidden && !$('settings-dialog').open) closeSearch(); }
   });
 }

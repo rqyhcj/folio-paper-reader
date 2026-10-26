@@ -34,3 +34,5 @@ jobs:
         run: node tests/test_poll_rendering.cjs
       - name: Check saved PDF layout upgrades
         run: node tests/test_reparse_updates.cjs
+      - name: Check AI layout and structured reading
+        run: node tests/test_ai_layout_ui.cjs

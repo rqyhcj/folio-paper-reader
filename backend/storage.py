@@ -46,8 +46,14 @@ def init_storage():
     with _db() as con:
         con.execute("CREATE TABLE IF NOT EXISTS papers (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
     for paper in list_papers(full=True):
+        changed = False
         if paper.get("status") == "translating":
             paper["status"] = "paused"
+            changed = True
+        if paper.get("ai_layout_status") == "running":
+            paper["ai_layout_status"] = "paused"
+            changed = True
+        if changed:
             save_paper(paper)
 
 

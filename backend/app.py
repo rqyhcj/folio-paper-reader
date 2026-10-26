@@ -13,6 +13,7 @@ from threading import Event
 from time import monotonic
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
+from typing import Literal
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -34,10 +35,14 @@ from .math_html import offline_math_assets
 from .page_view import equation_png, router as page_view_router
 from .pdf_runtime import PDF_LOCK
 from .translation_input import paragraph_input, validate_translation
+from .structured_content import rows_for, structure_html, structure_markdown, translate_structure
+from .ai_layout import analyze_page
+from .layout_update import apply_layout_update
 
 jobs: dict[str, asyncio.Task] = {}
 figure_jobs: dict[str, asyncio.Task] = {}
 parse_jobs: dict[str, asyncio.Task] = {}
+layout_jobs: dict[str, asyncio.Task] = {}
 FIGURE_VERSION = 2
 MAX_UPLOAD = 50 * 1024 * 1024
 SOURCE_FILES = {
@@ -53,7 +58,7 @@ SOURCE_FILES = {
 async def lifespan(app):
     db.init_storage()
     yield
-    active = list(jobs.values()) + list(figure_jobs.values()) + list(parse_jobs.values())
+    active = list(jobs.values()) + list(figure_jobs.values()) + list(parse_jobs.values()) + list(layout_jobs.values())
     for task in active:
         task.cancel()
     await asyncio.gather(*active, return_exceptions=True)
@@ -104,6 +109,14 @@ class TranslateInput(BaseModel):
     retry_failed: bool = False
 
 
+class AnalyzeInput(BaseModel):
+    scope: Literal["page", "all"] = "page"
+    page: int = Field(default=1, ge=1, le=500)
+    vision: bool = False
+    model: str | None = Field(default=None, max_length=150)
+    translate_after: bool = True
+
+
 def paper_or_404(paper_id):
     paper = db.get_paper(paper_id)
     if paper is None:
@@ -129,7 +142,8 @@ def ensure_figures(paper: dict, raw: bytes | None = None) -> dict:
     """Schedule artwork separately; neither import nor opening a paper waits for it."""
     paper_id = paper["id"]
     # Non-PDF images are already extracted with their document's reading order.
-    if paper.get("source_format", "pdf") != "pdf" or paper.get("parse_status") == "updating":
+    if (paper.get("source_format", "pdf") != "pdf" or paper.get("parse_status") == "updating"
+            or paper.get("ai_layout_status") == "running"):
         return paper
     if paper_id in figure_jobs and not figure_jobs[paper_id].done():
         return paper
@@ -157,6 +171,7 @@ def ensure_current_parse(paper: dict) -> dict:
             or paper["parse_version"] >= PARSE_VERSION
             or paper.get("parse_attempt_version") == PARSE_VERSION
             or paper.get("status") == "translating"
+            or paper.get("ai_layout_status") == "running"
             or (paper_id in jobs and not jobs[paper_id].done())):
         return paper
     if paper_id in parse_jobs and not parse_jobs[paper_id].done():
@@ -249,9 +264,10 @@ async def figure_job(paper_id: str, raw: bytes | None = None):
         if initial is None:
             return
         data = raw if raw is not None else await asyncio.to_thread((db.DATA / "papers" / f"{paper_id}.pdf").read_bytes)
+        region_options = {"suggested_regions": initial["ai_layout_regions"]} if initial.get("ai_layout_regions") else {}
         worker = asyncio.create_task(asyncio.to_thread(extract_figures, data, initial["paragraphs"],
                                                        figure_dir(paper_id), paper_id,
-                                                       on_progress=progress, should_stop=stop.is_set))
+                                                       on_progress=progress, should_stop=stop.is_set, **region_options))
         figures = await asyncio.shield(worker)
         current = db.get_paper(paper_id)
         if current is not None:
@@ -428,7 +444,11 @@ async def translation_job(paper_id: str, config: dict, paragraph_ids: list[str] 
                     queue.task_done()
                     continue
                 try:
-                    translated = validate_translation(source, await translate_text(paragraph_input(source), config))
+                    structure = {}
+                    if rows_for(source):
+                        translated, structure = await translate_structure(source, config)
+                    else:
+                        translated = validate_translation(source, await translate_text(paragraph_input(source), config))
                     error = None
                 except TranslationError as exc:
                     translated, error = None, str(exc)
@@ -438,6 +458,9 @@ async def translation_job(paper_id: str, config: dict, paragraph_ids: list[str] 
                 target = next(p for p in paper["paragraphs"] if p["id"] == pid)
                 target.update(translation=translated, error=error)
                 if translated:
+                    target.pop("translated_algorithm_lines", None)
+                    target.pop("translated_table_rows", None)
+                    target.update(structure)
                     target.pop("translation_review_reason", None)
                     target.pop("previous_translation_parts", None)
                 db.save_paper(db.refresh_progress(paper))
@@ -473,6 +496,8 @@ async def translation_job(paper_id: str, config: dict, paragraph_ids: list[str] 
 @app.post("/api/papers/{paper_id}/translate")
 async def start_translation(paper_id: str, payload: TranslateInput = TranslateInput()):
     paper = paper_or_404(paper_id)
+    if any(not task.done() for task in layout_jobs.values()):
+        raise HTTPException(409, "请先暂停 AI 整理，再单独开始翻译。")
     if paper_id in parse_jobs and not parse_jobs[paper_id].done():
         raise HTTPException(409, "正在本机更新论文排版，请稍后开始翻译；已有译文会保留。")
     if paper_id in jobs and not jobs[paper_id].done():
@@ -506,6 +531,8 @@ async def pause_translation(paper_id: str):
 @app.post("/api/papers/{paper_id}/paragraphs/{paragraph_id}/translate")
 async def retry_paragraph(paper_id: str, paragraph_id: str):
     paper = paper_or_404(paper_id)
+    if any(not task.done() for task in layout_jobs.values()):
+        raise HTTPException(409, "请先暂停 AI 整理，再重试单段翻译。")
     if paper_id in parse_jobs and not parse_jobs[paper_id].done():
         raise HTTPException(409, "正在本机更新论文排版，请稍后重试；已有译文会保留。")
     if any(not task.done() for task in jobs.values()):
@@ -533,6 +560,7 @@ async def retry_paragraph(paper_id: str, paragraph_id: str):
 @app.delete("/api/papers/{paper_id}")
 async def remove_paper(paper_id: str):
     paper = paper_or_404(paper_id)
+    await pause_analysis(paper_id)
     await pause_translation(paper_id)
     parser = parse_jobs.get(paper_id)
     if parser and not parser.done():
@@ -558,6 +586,119 @@ async def remove_paper(paper_id: str):
 
     await asyncio.to_thread(remove_files)
     return {"ok": True}
+
+
+@app.post("/api/papers/{paper_id}/analyze")
+async def start_analysis(paper_id: str, payload: AnalyzeInput = AnalyzeInput()):
+    paper = paper_or_404(paper_id)
+    if paper.get("is_demo") or paper.get("source_format", "pdf") != "pdf":
+        raise HTTPException(400, "AI 版面整理适用于已导入的 PDF。")
+    if payload.page > paper.get("page_count", 0):
+        raise HTTPException(400, "请选择论文中的有效页码。")
+    if any(not task.done() for task in layout_jobs.values()):
+        raise HTTPException(409, "已有 AI 整理任务，请先暂停后再开始。")
+    if any(not task.done() for task in jobs.values()):
+        raise HTTPException(409, "请先暂停当前翻译，再开始 AI 整理。")
+    paper = ensure_current_parse(paper)
+    if paper_id in parse_jobs and not parse_jobs[paper_id].done():
+        raise HTTPException(409, "本地排版正在更新，完成后即可使用 AI 整理。")
+    config = merged_settings(SettingsInput(model=payload.model.strip() if payload.model and payload.model.strip() else None))
+    if requires_key(config) and not config.get("api_key"):
+        raise HTTPException(400, "请先在 API 设置中填写密钥。")
+    if not source_file(paper).is_file():
+        raise HTTPException(404, "原始 PDF 文件不存在。")
+    pages = list(range(1, paper["page_count"] + 1)) if payload.scope == "all" else [payload.page]
+    request = {"pages": pages, "vision": payload.vision, "model": config["model"], "translate_after": payload.translate_after,
+               "parse_version": paper.get("parse_version")}
+    resume = paper.get("ai_layout_status") in {"paused", "error"} and paper.get("ai_layout_request") == request
+    if not resume:
+        paper.update(ai_layout_applied_pages=[], ai_layout_done_pages=[])
+    done = [p for p in paper.get("ai_layout_done_pages", []) if p in pages]
+    paper.update(ai_layout_status="running", ai_layout_error=None, ai_layout_request=request,
+                 ai_layout_progress={"done": len(done), "total": len(pages), "page": next((p for p in pages if p not in done), pages[-1])})
+    db.save_paper(paper)
+    layout_jobs[paper_id] = asyncio.create_task(layout_job(paper_id, config, payload, pages))
+    return paper
+
+
+async def layout_job(paper_id: str, config: dict, payload: AnalyzeInput, pages: list[int]):
+    crop_worker = None
+    crop_stop = Event()
+    try:
+        artwork = figure_jobs.get(paper_id)
+        if artwork and not artwork.done():
+            artwork.cancel()
+            await asyncio.gather(artwork, return_exceptions=True)
+        raw = await asyncio.to_thread(source_file(paper_or_404(paper_id)).read_bytes)
+        for number in pages:
+            paper = paper_or_404(paper_id)
+            if number in paper.get("ai_layout_done_pages", []):
+                continue
+            paper["ai_layout_progress"] = {"done": len(paper.get("ai_layout_done_pages", [])), "total": len(pages), "page": number}
+            db.save_paper(paper)
+            if number not in paper.get("ai_layout_applied_pages", []) and any(p.get("page") == number for p in paper["paragraphs"]):
+                proposal = await analyze_page(paper, number, raw, config, vision=payload.vision)
+                updated = apply_layout_update(paper_or_404(paper_id), proposal)
+                # Re-extract only this page using the validated model regions.
+                # The generated prefix cannot overwrite existing page images.
+                crop_worker = asyncio.create_task(asyncio.to_thread(
+                    extract_figures, raw, updated["paragraphs"], figure_dir(paper_id), paper_id,
+                    suggested_regions=updated.get("ai_layout_regions"), page_filter={number},
+                    id_prefix=f'f-ai-{int(updated["ai_layout_revision"])}-', should_stop=crop_stop.is_set))
+                figures = await asyncio.shield(crop_worker)
+                crop_worker = None
+                if db.get_paper(paper_id) is None:
+                    return
+                updated["figures"] = [f for f in updated.get("figures", []) if f.get("page") != number] + figures
+                updated.setdefault("ai_layout_applied_pages", []).append(number)
+                updated.update(ai_layout_status="running", ai_layout_error=None)
+                db.save_paper(db.refresh_progress(updated))
+            paper = paper_or_404(paper_id)
+            if payload.translate_after:
+                pending = [p["id"] for p in db.translation_paragraphs(paper) if p.get("page") == number and not p.get("translation")]
+                if pending:
+                    paper.update(status="translating", error=None)
+                    db.save_paper(paper)
+                    task = asyncio.create_task(translation_job(paper_id, config, pending))
+                    jobs[paper_id] = task
+                    await task
+                    paper = paper_or_404(paper_id)
+                    if any(p.get("error") and not p.get("translation") for p in paper["paragraphs"] if p["id"] in pending):
+                        raise TranslationError("本页排版已保存，但部分译文未完成；再次开始相同范围可接着翻译，无需重新识别本页。")
+            paper.setdefault("ai_layout_done_pages", []).append(number)
+            paper["ai_layout_progress"] = {"done": len(paper["ai_layout_done_pages"]), "total": len(pages), "page": number}
+            db.save_paper(db.refresh_progress(paper))
+        paper = paper_or_404(paper_id)
+        paper.update(ai_layout_status="completed", ai_layout_error=None)
+        db.save_paper(paper)
+    except asyncio.CancelledError:
+        crop_stop.set()
+        if crop_worker is not None:
+            await asyncio.gather(crop_worker, return_exceptions=True)
+        paper = db.get_paper(paper_id)
+        if paper is not None:
+            paper.update(ai_layout_status="paused", status="paused")
+            db.save_paper(db.refresh_progress(paper))
+        raise
+    except Exception as exc:
+        paper = db.get_paper(paper_id)
+        if paper is not None:
+            message = str(exc) if isinstance(exc, TranslationError) else "AI 整理暂未完成，原文和已完成部分已保留，可重试。"
+            paper.update(ai_layout_status="error", ai_layout_error=message)
+            db.save_paper(db.refresh_progress(paper))
+    finally:
+        crop_stop.set()
+        layout_jobs.pop(paper_id, None)
+
+
+@app.post("/api/papers/{paper_id}/analyze/pause")
+async def pause_analysis(paper_id: str):
+    paper_or_404(paper_id)
+    task = layout_jobs.get(paper_id)
+    if task and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    return paper_or_404(paper_id)
 
 
 @app.get("/api/papers/{paper_id}/figures/{figure_id}.png")
@@ -654,7 +795,10 @@ async def export(paper_id: str, format: str = "markdown"):
                 continue
             tag = "h2" if p["kind"] == "heading" else "p"
             section = "".join(image_html(f) for f in paper.get("figures", []) if f.get("before_paragraph_id") == p["id"])
-            if p.get("kind") == "equation" or p.get("math_status") == "source-image":
+            if rows_for(p):
+                translated = structure_html(p, translated=True) or f'<p class="zh">{html_with_math(p, p.get("translation") or "[尚未翻译]", inline_paths)}</p>'
+                section += f'<section class="structured-block">{structure_html(p)}{translated}</section>'
+            elif p.get("kind") == "equation" or p.get("math_status") == "source-image":
                 if p.get("math_status") == "source-image":
                     path = equation_paths.get(p["id"])
                     if path is not None and path.is_file():
@@ -668,7 +812,8 @@ async def export(paper_id: str, format: str = "markdown"):
                 if p.get("kind") != "equation":
                     section += f'<p class="zh">{html_with_math(p, p.get("translation") or "[尚未翻译]", inline_paths)}</p>'
             else:
-                section += f'<section><{tag} class="en">{html.escape(p["text"])}</{tag}><p class="zh">{html_with_math(p, p.get("translation") or "[尚未翻译]", inline_paths)}</p></section>'
+                source = html_with_math(p, p.get("translation_text") or p["text"], inline_paths) if p.get("math_status") == "source-inline" else html.escape(p["text"])
+                section += f'<section><{tag} class="en">{source}</{tag}><p class="zh">{html_with_math(p, p.get("translation") or "[尚未翻译]", inline_paths)}</p></section>'
             for f in paper.get("figures", []):
                 if not f.get("before_paragraph_id") and f.get("after_paragraph_id") == p["id"]:
                     section += image_html(f)
@@ -677,11 +822,16 @@ async def export(paper_id: str, format: str = "markdown"):
         body = "".join(sections)
         content = f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{html.escape(title)}</title><style>body{{max-width:820px;margin:64px auto;padding:0 24px;color:#273638;background:#faf9f6;line-height:1.9}}h1{{line-height:1.3}}.en{{font-family:Georgia,serif;font-size:18px}}.zh{{font-family:system-ui;color:#476364;font-size:17px}}section{{margin:32px 0}}h2{{font-size:24px}}@media print{{body{{margin:0;background:white}}}}</style><h1>{html.escape(title)}</h1><p>纸间 · 英中对照阅读</p>{body}</html>'
         media, extension = "text/html", "html"
+        content = content.replace("</style>", ".algorithm{border-block:1px solid #aabbb4;padding:12px 0;line-height:1.7}.algorithm-line{white-space:pre-wrap;overflow-wrap:anywhere}.table-scroll{overflow-x:auto}.paper-table{border-collapse:collapse;width:100%;font-size:15px}.paper-table td{border:1px solid #c6d3cc;padding:6px 10px;vertical-align:top}.structured-block>.zh,.structured-block>.table-scroll+.table-scroll{margin-top:18px}</style>")
         content = content.replace("</html>", offline_math_assets() + "</html>")
     else:
         chunks = [f"# {title}", "纸间 · 英中对照阅读"]
         for p in paper["paragraphs"]:
-            chunks.extend([("## " if p["kind"] == "heading" else "") + p["text"],
+            if rows_for(p):
+                chunks.extend([structure_markdown(p), structure_markdown(p, translated=True) or text_with_math(p, p.get("translation") or "[尚未翻译]", markdown=True)])
+                continue
+            source = text_with_math(p, p.get("translation_text") or p["text"], markdown=True) if p.get("math_status") == "source-inline" else p["text"]
+            chunks.extend([("## " if p["kind"] == "heading" else "") + source,
                            text_with_math(p, p.get("translation") or "[尚未翻译]", markdown=True)])
         content, media, extension = "\n\n".join(chunks), "text/markdown", "md"
     return Response(content, media_type=media, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(title[:100] + '.' + extension)}"})

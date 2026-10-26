@@ -182,12 +182,13 @@ def _retry_delay(response: httpx.Response | None, attempt: int) -> float:
 
 
 async def _request_translation(
-    text: str, endpoint: str, model: str, api_key: str, client: httpx.AsyncClient
+    text: str, endpoint: str, model: str, api_key: str, client: httpx.AsyncClient,
+    *, system_prompt: str = SYSTEM_PROMPT,
 ) -> str:
     body = {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": text},
         ],
         "stream": False,
@@ -218,16 +219,17 @@ async def _request_translation(
 
 
 async def translate_text(
-    text: str, settings: dict, *, client: httpx.AsyncClient | None = None
+    text: str, settings: dict, *, client: httpx.AsyncClient | None = None,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> str:
     """Translate one paragraph, with at most two transient-failure retries."""
     if not isinstance(text, str) or not text.strip():
         raise TranslationError("没有可翻译的文本。")
     endpoint, model, api_key = _configuration(settings)
     if client is not None:
-        return await _request_translation(text, endpoint, model, api_key, client)
+        return await _request_translation(text, endpoint, model, api_key, client, system_prompt=system_prompt)
     async with httpx.AsyncClient() as owned_client:
-        return await _request_translation(text, endpoint, model, api_key, owned_client)
+        return await _request_translation(text, endpoint, model, api_key, owned_client, system_prompt=system_prompt)
 
 
 async def test_connection(settings: dict, *, client: httpx.AsyncClient | None = None) -> dict:

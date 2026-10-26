@@ -25,6 +25,8 @@ def _image_label(paragraph, rect):
     Their geometry still proves duplication, but protect conventional and
     numbered section titles from suppression if an image region is too broad.
     """
+    if paragraph.get("kind") in {"algorithm", "table"}:
+        return False
     text = paragraph.get("text", "").strip()
     if len(text) > 300 or CAPTION.match(text) or not _inside(paragraph, rect):
         return False
@@ -164,7 +166,11 @@ def _anchors(rect, page_paras, caption):
 
 def extract_figures(data: bytes, paragraphs: list[dict], destination: Path, paper_id: str,
                     *, on_progress: Callable | None = None,
-                    should_stop: Callable[[], bool] | None = None) -> list[dict]:
+                    should_stop: Callable[[], bool] | None = None,
+                    suggested_regions: list[dict] | None = None,
+                    page_filter: set[int] | None = None, id_prefix: str = "f-") -> list[dict]:
+    if not re.fullmatch(r"f-(?:ai-[0-9]+-)?", id_prefix):
+        raise ValueError("Invalid generated image prefix")
     figures = []
     total_bytes = 0
     stopped = should_stop or (lambda: False)
@@ -181,13 +187,27 @@ def extract_figures(data: bytes, paragraphs: list[dict], destination: Path, pape
         nonlocal total_bytes
         page_paras = [p for p in paragraphs if p["page"] == page_index + 1]
         captions = snapshot["captions"]
-        for rect in _regions(snapshot, stopped):
+        suggestions = [r for r in suggested_regions or [] if r.get("page") == page_index + 1]
+        regions = list(_regions(snapshot, stopped))
+        for suggestion in suggestions:
+            rect = suggestion["bbox"]
+            regions = [r for r in regions if _area(_intersect(r, rect)) < min(_area(r), _area(rect)) * .5]
+            regions.append(tuple(rect))
+        structures = [p for p in page_paras if p.get("kind") in {"algorithm", "table"} and p.get("bbox")]
+        for rect in sorted(regions, key=lambda r: (r[1], r[0])):
+            # A recovered algorithm/table has actual selectable text. Do not
+            # reproduce its horizontal rules as a second screenshot figure.
+            if any(_area(_intersect(rect, p["bbox"])) >= _area(rect) * .75 for p in structures):
+                continue
             if stopped():
                 return
             if len(figures) >= 300 or total_bytes > 80 * 1024 * 1024:
                 return
             candidates = [(box, text) for box, text in captions if abs(box[1] - rect[3]) < 160 and box[2] > rect[0] and box[0] < rect[2]]
             caption = min(candidates, key=lambda item: abs(item[0][1] - rect[3]))[1] if candidates else ""
+            chosen = next((r for r in suggestions if list(rect) == list(r["bbox"])), None)
+            if chosen and chosen.get("caption"):
+                caption = chosen["caption"]
             after, before = _anchors(rect, page_paras, caption)
             if after is None and before is None:
                 previous = [p for p in paragraphs if p["page"] < page_index + 1]
@@ -200,7 +220,7 @@ def extract_figures(data: bytes, paragraphs: list[dict], destination: Path, pape
                 content, width, height = render_crop(document[page_index], rect)
             if stopped():
                 return
-            fid = f"f-{len(figures) + 1}"
+            fid = f"{id_prefix}{len(figures) + 1}"
             (destination / f"{fid}.png").write_bytes(content)
             total_bytes += len(content)
             figures.append({"id": fid, "page": page_index + 1, "after_paragraph_id": after,
@@ -218,6 +238,8 @@ def extract_figures(data: bytes, paragraphs: list[dict], destination: Path, pape
         for page_index in range(page_count):
             if stopped():
                 break
+            if page_filter is not None and page_index + 1 not in page_filter:
+                continue
             with PDF_LOCK:
                 snapshot = _page_snapshot(document[page_index])
             extract_page(snapshot, page_index)

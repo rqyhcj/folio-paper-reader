@@ -265,6 +265,10 @@ def reflow_paper(old: dict, parsed: dict, positions: dict | None = None) -> dict
                     paragraph["previous_translation_parts"] = deepcopy(review["parts"])
             elif chosen["paragraph"].get("translation"):
                 paragraph["translation"] = chosen["paragraph"]["translation"]
+                prior = chosen["paragraph"]
+                for source_field, translated_field in (("algorithm_lines", "translated_algorithm_lines"), ("table_rows", "translated_table_rows")):
+                    if prior.get(source_field) == paragraph.get(source_field) and prior.get(translated_field):
+                        paragraph[translated_field] = deepcopy(prior[translated_field])
             elif chosen["paragraph"].get("previous_translation_parts"):
                 safe_parts = [part for part in chosen["paragraph"]["previous_translation_parts"]
                               if part.get("translation") and not response_issue(part["translation"], part.get("text", ""))]
