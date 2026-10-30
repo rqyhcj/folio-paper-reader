@@ -1,7 +1,7 @@
 .reader-view { position: relative; }
 .paper-chat-action { white-space: nowrap; }
 .paper-chat-backdrop { position: absolute; inset: 0; z-index: 24; background: #17231c33; backdrop-filter: blur(1px); }
-.paper-chat-panel { position: absolute; z-index: 25; inset: 0 0 0 auto; width: min(430px, calc(100% - 32px)); display: flex; flex-direction: column; min-height: 0; color: var(--text); background: var(--folio-panel, var(--canvas)); border-left: 1px solid var(--line); box-shadow: -18px 0 55px #1831291f; }
+.paper-chat-panel { position: absolute; z-index: 25; inset: 0 0 0 auto; width: min(500px, calc(100% - 32px)); display: flex; flex-direction: column; min-height: 0; color: var(--text); background: var(--folio-panel, var(--canvas)); border-left: 1px solid var(--line); box-shadow: -18px 0 55px #1831291f; }
 .paper-chat-panel[hidden], .paper-chat-backdrop[hidden] { display: none; }
 .paper-chat-panel > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; padding: 25px 25px 14px; }
 .paper-chat-panel .mini-label { color: var(--muted); font: 9px/1.5 var(--sans); letter-spacing: 1.4px; }
@@ -15,11 +15,18 @@
 .paper-chat-empty { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; color: var(--muted); font: 11px/1.7 var(--sans); }
 .paper-chat-empty svg { width: 30px; height: 30px; color: var(--teal); opacity: .65; }
 .paper-chat-empty strong { color: var(--text); font-weight: 500; }
-.paper-chat-message { max-width: 92%; padding: 10px 13px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.8 var(--sans); }
+.paper-chat-message { max-width: 96%; padding: 11px 14px; border-radius: 10px; overflow-wrap: anywhere; font: 13px/1.85 var(--sans); }
 .paper-chat-message.user { align-self: flex-end; color: var(--ink); background: color-mix(in srgb, var(--teal) 12%, var(--folio-panel, #fff)); border-bottom-right-radius: 3px; }
 .paper-chat-message.assistant { align-self: flex-start; color: var(--text); background: var(--folio-panel-soft, var(--canvas)); border: 1px solid var(--line); border-bottom-left-radius: 3px; }
 .paper-chat-message.pending { color: var(--muted); }
 .paper-chat-message.error { color: #a45e45; border-color: color-mix(in srgb, #a45e45 35%, var(--line)); }
+.paper-chat-message p { margin: .45em 0; }
+.paper-chat-message h3,.paper-chat-message h4,.paper-chat-message h5,.paper-chat-message h6 { margin: .8em 0 .3em; color: var(--ink); font-weight: 650; line-height: 1.5; }
+.paper-chat-message ul,.paper-chat-message ol { margin: .45em 0 .65em; padding-left: 1.55em; }
+.paper-chat-message li + li { margin-top: .35em; }
+.paper-chat-message blockquote { margin: .6em 0; padding-left: .8em; border-left: 2px solid var(--teal); color: var(--muted); }
+.paper-chat-message code { padding: .08em .28em; border-radius: 3px; background: color-mix(in srgb, var(--teal) 8%, transparent); font: .92em/1.5 var(--mono, monospace); }
+.paper-chat-message strong { color: var(--ink); font-weight: 650; }
 .paper-chat-message .katex-display { margin: .65em 0; overflow-x: auto; overflow-y: hidden; padding-bottom: 2px; }
 .paper-chat-panel form { flex: 0 0 auto; padding: 15px 25px 22px; border-top: 1px solid var(--line); background: var(--folio-panel, var(--canvas)); }
 .paper-chat-panel form label { display: block; margin-bottom: 7px; color: var(--muted); font: 10px/1.5 var(--sans); }

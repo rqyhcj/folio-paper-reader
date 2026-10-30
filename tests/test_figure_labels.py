@@ -2,7 +2,7 @@
 
 import pymupdf as fitz
 
-from backend.figures import _complete_figure_regions, _image_label, extract_figures
+from backend.figures import _anchors, _complete_figure_regions, _image_label, _regions, extract_figures
 from backend.pdf_export import export_pdf
 
 
@@ -42,6 +42,36 @@ def test_adjacent_panels_with_one_caption_become_one_complete_label_region():
     regions = _complete_figure_regions([(90, 70, 230, 145), (290, 72, 510, 142)], [caption], (0, 0, 600, 800))
     assert regions == [(90, 70, 510, 177)]
     assert _image_label(_paragraph("label", "Naïve", kind="paragraph", bbox=(150, 150, 190, 160)), regions[0])
+
+
+def test_two_caption_bands_split_a_page_wide_drawing_cluster_into_two_figures():
+    snapshot = {
+        "bounds": (0, 0, 600, 800),
+        "images": [(110, 80, 205, 170), (210, 80, 305, 170),
+                   (310, 80, 405, 170), (410, 80, 505, 170)],
+        # The first path mimics a bogus page-wide cluster. Five lower paths are
+        # panels of a second chart with its own caption.
+        "drawings": [(24, 60, 560, 650), (110, 430, 180, 475), (195, 430, 265, 475),
+                     (280, 430, 350, 475), (365, 430, 435, 475), (440, 430, 510, 475)],
+        "captions": [((108, 360, 505, 405), "Figure 7: visual examples"),
+                     ((108, 500, 505, 540), "Figure 8: efficiency")],
+    }
+    found = _regions(snapshot)
+    assert len(found) == 2
+    assert found[0][3] < 360
+    assert found[1][1] > 405 and found[1][3] < 500
+
+
+def test_figure_anchor_uses_its_numbered_caption_not_a_short_label_mentioned_inside_it():
+    rect = (108, 70, 504, 358)
+    paragraphs = [
+        _paragraph("label", "NF4 W4A16", kind="paragraph", bbox=(170, 68, 200, 74)),
+        _paragraph("caption", "Figure 7: NF4 W4A16 qualitative visual results on MJHQ.",
+                   kind="paragraph", bbox=(108, 361, 505, 405)),
+        _paragraph("next", "The following body paragraph.", kind="paragraph", bbox=(108, 420, 505, 435)),
+    ]
+    assert _anchors(rect, paragraphs, "Figure 7: NF4 W4A16 qualitative visual results on MJHQ.") == (
+        "label", "caption")
 
 
 def test_extraction_marks_bold_labels_but_preserves_source_and_real_sections(tmp_path):

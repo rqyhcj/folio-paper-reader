@@ -28,7 +28,7 @@ MAX_TEXT_CHARS = 3_000_000
 MAX_PARAGRAPH_CHARS = 1400
 TARGET_PARAGRAPH_CHARS = 850
 MAX_PARAGRAPH_SENTENCES = 4
-PARSE_VERSION = 11
+PARSE_VERSION = 12
 
 
 class PDFExtractionError(ValueError):
@@ -99,12 +99,19 @@ def _read_lines(page: fitz.Page, page_number: int, removed_line_numbers: list[di
                     span.pop("chars", None)
                 if not text:
                     continue
+                # CMEX can encode a tall delimiter as repeated control-code
+                # extension pieces.  Preserve a temporary printable marker so
+                # the physical line survives until ``annotate_page_math``
+                # verifies the embedded glyph names and replaces it with the
+                # semantic delimiter.  The marker never enters stored text.
+                piece_text = ("¤" if text.isspace()
+                              and "CMEX" in span.get("font", "").upper() else text)
                 if previous and pieces and not pieces[-1].endswith(" ") and not text.startswith(" "):
                     gap = span["bbox"][0] - previous["bbox"][2]
                     if gap > min(span.get("size", 10), previous.get("size", 10)) * 0.18:
                         pieces.append(" ")
-                pieces.append(text)
-                count = len(text.strip())
+                pieces.append(piece_text)
+                count = len(piece_text.strip())
                 size = round(float(span.get("size", 10)), 1)
                 weights[size] += count
                 total_chars += count
@@ -128,6 +135,8 @@ def _read_lines(page: fitz.Page, page_number: int, removed_line_numbers: list[di
             ))
     lines = _remove_review_line_numbers(lines, removed_line_numbers)
     annotate_page_math(page, lines)
+    for line in lines:
+        line.text = _clean(_span_text(line.spans))
     return _attach_extension_fragments(_merge_line_fragments(lines))
 
 
@@ -307,8 +316,14 @@ def _merge_line_fragments(lines: list[_Line]) -> list[_Line]:
             equation_number_pair = ((is_number(line) and any(has_math(item) for item in row))
                                     or (has_math(line) and any(is_number(item) for item in row)))
             overlap_y = min(max(item.y1 for item in row), line.y1) - max(min(item.y0 for item in row), line.y0)
+            # A floating figure caption can sit only a few points from the
+            # wrapped body column at the same baseline. Two substantial prose
+            # runs from different PDF blocks are separate flows, not one line.
+            # Short mathematical fragments remain eligible for attachment.
+            cross_block_prose = (not same_block and len(line.text) >= 24
+                                 and any(len(item.text) >= 24 for item in row))
             if overlap_y <= 0 or not (horizontal_gap < min(main.size, line.size) * 1.5
-                                      or (same_block and equation_number_pair)):
+                                      or (same_block and equation_number_pair)) or cross_block_prose:
                 continue
             candidates.append((abs(line.baseline - main.baseline), horizontal_gap, row))
         if candidates:
@@ -393,16 +408,23 @@ def _attach_inline_math_fragments(lines: list[_Line], body_size: float) -> list[
     prose = [line for line in lines if not line.equation and line.size >= body_size * .85
              and not _math_only(line) and _heading_level(line, body_size) is None]
     for fragment in lines:
-        if not any(item is fragment for item in pending) or fragment.equation or not _math_only(fragment):
+        accent_only = bool(re.fullmatch(r"[ˆ˜~¯˙¨]+", fragment.text.strip()))
+        if (not any(item is fragment for item in pending) or fragment.equation
+                or not (_math_only(fragment) or accent_only)):
             continue
         if fragment.x1 - fragment.x0 > fragment.width * .45:
             continue
         targets = [line for line in prose if column(line) == column(fragment)
+                   and (line.block == fragment.block
+                        or max(line.x0 - fragment.x1, fragment.x0 - line.x1, 0) <= body_size * .35)
                    and ((fragment.size < body_size * .85
                          and abs(line.baseline - fragment.baseline) <= body_size * .90
                          and max(line.x0 - fragment.x1, fragment.x0 - line.x1, 0) <= body_size * 2.6)
                         or (abs(line.baseline - fragment.baseline) <= body_size * .34
-                            and max(line.x0 - fragment.x1, fragment.x0 - line.x1, 0) <= body_size * 1.8))
+                            and max(line.x0 - fragment.x1, fragment.x0 - line.x1, 0) <= body_size * 1.8)
+                        or (any("CMEX" in span.get("font", "").upper() for span in fragment.spans)
+                            and abs(line.baseline - fragment.baseline) <= body_size * 1.35
+                            and max(line.x0 - fragment.x1, fragment.x0 - line.x1, 0) <= body_size * .35))
                    and min(line.y1, fragment.y1) > max(line.y0, fragment.y0)]
         if not targets:
             continue
@@ -442,6 +464,16 @@ def _mark_inline_regions(lines: list[_Line], body_size: float) -> list[_Line]:
             changed = False
             for line in candidates:
                 if id(line) in assigned or id(line) in member_ids or column(line) != column(seed):
+                    continue
+                # Body text wrapping around a floating figure can be only a
+                # few points from its caption. Keep separate PDF blocks in
+                # separate horizontal lanes; only mathematical fragments may
+                # bridge that gap into the surrounding prose.
+                prose_members = [item for item in members if not _math_only(item)]
+                overlaps_lane = any(min(line.x1, item.x1) > max(line.x0, item.x0)
+                                    for item in prose_members)
+                same_source_block = any(line.block == item.block for item in prose_members)
+                if prose_members and not _math_only(line) and not overlaps_lane and not same_source_block:
                     continue
                 if any(max(line.y0 - item.y1, item.y0 - line.y1, 0) <= body_size * .45
                        for item in members):
@@ -763,8 +795,12 @@ def _assemble_page(lines: list[_Line], body_size: float, structures: list[dict] 
     group: list[_Line] = []
     group_level: int | None = None
     group_equation = False
+    # Attach radicals, limits and small formula rows to overlapping prose
+    # before display-equation clustering. Otherwise two inline square roots on
+    # the same prose line can be mistaken for one standalone screenshot.
+    lines = _attach_inline_math_fragments(lines, body_size)
     lines = _merge_equation_regions(lines, body_size)
-    lines = _mark_inline_regions(_attach_inline_math_fragments(lines, body_size), body_size)
+    lines = _mark_inline_regions(lines, body_size)
     for block in structures or []:
         x0, y0, x1, y1 = block["bbox"]
         lines.append(_Line(block["text"], x0, y0, x1, y1, body_size, False, -1,
@@ -1042,7 +1078,72 @@ def extract_pdf(data: bytes, filename: str) -> dict:
         assembled = []
         for index, lines in enumerate(pages):
             structures, consumed = extract_structures(document[index], lines, body_size)
-            assembled.extend(_assemble_page([line for line in lines if id(line) not in consumed], body_size, structures))
+            # Remove only text already reproduced inside confirmed artwork.
+            # This prevents chart ticks / legends from being interleaved with
+            # body prose that wraps around a floating figure. Captions stop
+            # outside the crop and remain selectable bilingual paragraphs.
+            from .figures import _area, _intersect, _page_snapshot
+            snapshot = _page_snapshot(document[index])
+            # Keep text extraction independent from the background figure
+            # clustering job. Caption bands are sufficient here: union only
+            # substantial image/vector boxes above each caption, ignoring the
+            # tiny rules used by formulas and tables.
+            artwork = [tuple(rect) for rect in snapshot["images"]
+                       if _area(rect) >= 1200]
+            previous_caption_bottom = snapshot["bounds"][1]
+            for caption_box, _ in sorted(snapshot["captions"], key=lambda item: item[0][1]):
+                top, bottom = previous_caption_bottom + 3, caption_box[1] - 3
+                previous_caption_bottom = max(previous_caption_bottom, caption_box[3])
+                parts = [tuple(rect) for rect in snapshot["images"]
+                         if rect[1] >= top and rect[3] <= bottom and _area(rect) >= 1200]
+                parts.extend(tuple(rect) for rect in snapshot["drawings"]
+                             if rect[1] >= top and rect[3] <= bottom and _area(rect) >= 300)
+                if not parts:
+                    continue
+                guided = parts[0]
+                for part in parts[1:]:
+                    guided = (min(guided[0], part[0]), min(guided[1], part[1]),
+                              max(guided[2], part[2]), max(guided[3], part[3]))
+                artwork.append(guided)
+            structure_boxes = [item["bbox"] for item in structures if item.get("bbox")]
+            artwork = [rect for rect in artwork if not any(
+                _area(_intersect(rect, box)) >= _area(rect) * .75 for box in structure_boxes)]
+
+            def artwork_text(line):
+                box = (line.x0, line.y0, line.x1, line.y1)
+                return any(_area(_intersect(box, rect)) >= _area(box) * .88 for rect in artwork)
+
+            available = [line for line in lines if id(line) not in consumed and not artwork_text(line)]
+            caption_boxes = [box for box, _ in snapshot["captions"]]
+
+            def caption_box_for(line):
+                box = (line.x0, line.y0, line.x1, line.y1)
+                return next((rect for rect in caption_boxes
+                             if _area(_intersect(box, rect)) >= _area(box) * .82), None)
+
+            # Parse each caption in its own horizontal lane.  A floating chart
+            # caption may share baselines with body text wrapping beside it;
+            # one global reading-order pass would interleave their words.
+            caption_lines = {rect: [] for rect in caption_boxes}
+            prose_lines = []
+            for line in available:
+                rect = caption_box_for(line)
+                (caption_lines[rect] if rect else prose_lines).append(line)
+            page_parts = _assemble_page(prose_lines, body_size, structures)
+            for rect in caption_boxes:
+                for caption in _assemble_page(caption_lines[rect], body_size):
+                    following = []
+                    for position, item in enumerate(page_parts):
+                        box = item.get("bbox")
+                        if not box or box[1] < caption["bbox"][3] - 3:
+                            continue
+                        overlap = max(0, min(box[2], caption["bbox"][2])
+                                      - max(box[0], caption["bbox"][0]))
+                        if overlap >= min(box[2] - box[0], caption["bbox"][2] - caption["bbox"][0]) * .25:
+                            following.append((box[1] - caption["bbox"][3], position))
+                    position = min(following)[1] if following else len(page_parts)
+                    page_parts.insert(position, caption)
+            assembled.extend(page_parts)
         for paragraph in stitch_sentences(assembled, body_size):
             for chunk in _chunk_paragraph(paragraph):
                 paragraphs.append({**chunk, "id": f"p-{len(paragraphs) + 1}",

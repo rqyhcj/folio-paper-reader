@@ -52,6 +52,24 @@ def test_superscript_and_subscript_on_one_variable_keep_their_sides():
     assert recover_expression(spans) == "x_{i}^{2}"
 
 
+def test_verified_cmex_radical_sum_and_limits_recover_without_raw_font_codes():
+    root = span("q", 100, font="CMEX10")
+    root["chars"][0]["_glyph_name"] = "radicalBig"
+    summation = span("P", 105.5, font="CMEX10")
+    summation["chars"][0]["_glyph_name"] = "summationtext"
+    upper = span("min(m,n)", 111, y=94, size=7)
+    lower = span("i=r+1", 111, y=106, size=7)
+    sigma = span("σ", 150, font="CMMI10")
+    subscript = span("i", 155.5, y=106, size=7, font="CMMI7")
+    superscript = span("2", 155.5, y=94, size=7)
+    spans = [root, summation, upper, lower, sigma, subscript, superscript]
+    rule = (105.5, 92.5, 160.5)
+    for item in spans:
+        item["_math_rules"] = [rule]
+    assert recover_expression(spans) == (
+        r"\sqrt{\sum_{i=r+1}^{\operatorname{min}(m,n)}\sigma _{i}^{2}}")
+
+
 def test_geometric_hat_is_attached_to_its_bold_variable_instead_of_becoming_an_image():
     spans = [span("ˆ", 12, y=97.5, font="CMR10"), span("X", 10, font="CMMIB10")]
     assert keep_span_characters(spans[0])

@@ -191,6 +191,25 @@ async function main() {
   assert.equal(formulas(temporary).length, 1);
 
   vm.runInContext(read('static/app.js').replace(/^import[^\n]+\n/gm, '').replace(/\ninit\(\);\s*$/, ''), context);
+  const markdownBubble = new TestNode('div');
+  chatPanel.append(markdownBubble);
+  context.element = markdownBubble;
+  context.chatMarkdown = String.raw`# 核心方法
+
+* **异常值迁移** 使用 $\hat{W}$。
+* 保留低秩分支。
+
+\[Q(X)=s_X Q_X\]
+
+<script>alert(1)</script>`;
+  vm.runInContext("state.search=''; renderChatMarkdown(element, chatMarkdown);", context);
+  assert.equal(formulas(markdownBubble).length, 2, 'connected Q&A Markdown renders inline and display LaTeX immediately');
+  assert.ok(walk(markdownBubble).some((item) => item.nodeName === 'STRONG' && item.textContent.includes('异常值迁移')));
+  assert.equal(walk(markdownBubble).filter((item) => item.nodeName === 'UL').length, 1);
+  assert.equal(walk(markdownBubble).filter((item) => item.nodeName === 'LI').length, 2);
+  assert.ok(markdownBubble.textContent.includes('<script>alert(1)</script>'));
+  assert.ok(!walk(markdownBubble).some((item) => item.nodeName === 'SCRIPT'), 'model HTML stays inert text');
+  assert.ok(!markdownBubble.textContent.includes('**'), 'Markdown markers do not leak into the answer');
   const search = paragraph('');
   context.element = search;
   vm.runInContext("state.search = 'x'; paragraphText(element, 'Find x in $x_t$ and $x_0$, without splitting formulas.');", context);

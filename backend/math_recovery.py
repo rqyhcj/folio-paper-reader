@@ -67,11 +67,11 @@ def keep_span_characters(span: dict) -> bool:
     Most PDF text is prose; retaining rawdict's nested per-character records
     for the entire paper would multiply memory usage unnecessarily.
     """
+    if _MATH_FONT.search(span.get("font", "")):
+        return True
     text = span.get("text", "").strip()
     if not text or len(text) > 450:
         return False
-    if _MATH_FONT.search(span.get("font", "")):
-        return True
     words = re.findall(r"[A-Za-z]+", text)
     allowed = all(len(word) == 1 or word in _OPERATORS for word in words)
     return allowed and all(char.isspace() or char in _GREEK_NAMES or char in _SYMBOLS or char in _ACCENTS
@@ -83,7 +83,7 @@ def _glyphs(spans: list[dict]) -> list[_Glyph]:
     for span in spans:
         for char in span.get("chars", []):
             value = char.get("c", "")
-            if not value or value.isspace():
+            if not value or (value.isspace() and not char.get("_glyph_name")):
                 continue
             box = char.get("bbox", span["bbox"])
             origin = char.get("origin", span.get("origin", (box[0], box[3])))
@@ -102,7 +102,8 @@ def _tex(glyph: _Glyph) -> str | None:
     named = {"parenleftbig": "(", "parenrightbig": ")", "parenleftBig": "(", "parenrightBig": ")",
              "parenleftbigg": "(", "parenrightbigg": ")", "parenleftBigg": "(", "parenrightBigg": ")",
              "bracketleftbig": "[", "bracketrightbig": "]", "bracketleftBig": "[", "bracketrightBig": "]",
-             "bracketleftbigg": "[", "bracketrightbigg": "]", "bracketleftBigg": "[", "bracketrightBigg": "]"}
+             "bracketleftbigg": "[", "bracketrightbigg": "]", "bracketleftBigg": "[", "bracketrightBigg": "]",
+             "summationtext": r"\sum", "summationdisplay": r"\sum", "vextenddouble": r"\Vert "}
     if glyph.name in named:
         return named[glyph.name]
     # Computer Modern's extension font often decodes accents/delimiters as
@@ -140,7 +141,8 @@ def _balanced(glyphs: list[_Glyph]) -> bool:
     return not stack
 
 
-def _recover_flat_expression(spans: list[dict], *, numbered: bool = False) -> str | None:
+def _recover_flat_expression(spans: list[dict], *, numbered: bool = False,
+                             fragment: bool = False) -> str | None:
     """Return TeX only when the extracted characters and layout are unambiguous.
 
     ``spans`` must contain rawdict ``chars`` with original font, size, origin,
@@ -168,13 +170,15 @@ def _recover_flat_expression(spans: list[dict], *, numbered: bool = False) -> st
     glyphs = _glyphs(spans)
     if not glyphs or len(glyphs) > 450:
         return None
-    result = _flat_glyphs(glyphs, numbered=numbered)
+    result = _flat_glyphs(glyphs, numbered=numbered, continuation=fragment,
+                          allow_trailing=fragment)
     if result and equation_number:
         result += r"\tag{" + equation_number + "}"
     return result
 
 
-def _flat_glyphs(glyphs: list[_Glyph], *, numbered: bool = False, continuation: bool = False) -> str | None:
+def _flat_glyphs(glyphs: list[_Glyph], *, numbered: bool = False, continuation: bool = False,
+                 allow_trailing: bool = False) -> str | None:
     # Any glyph that cannot be decoded also invalidates the surrounding
     # expression. A plausible subset would silently alter its meaning.
     if any(_tex(glyph) is None for glyph in glyphs):
@@ -250,7 +254,8 @@ def _flat_glyphs(glyphs: list[_Glyph], *, numbered: bool = False, continuation: 
             value += key + "{" + "".join(_tex(item) for item in script).strip() + "}"
         pieces.append(value)
     result = "".join(pieces).strip()
-    if (main[0].char and main[0].char in ("*/" if continuation else "=<>*/")) or (main[-1].char and main[-1].char in "=<>+*/-"):
+    if ((main[0].char and main[0].char in ("*/" if continuation else "=<>*/"))
+            or (not allow_trailing and main[-1].char and main[-1].char in "=<>+*/-")):
         return None
     return result or None
 
@@ -378,6 +383,19 @@ def annotate_page_math(page, lines: list) -> None:
             value = char.get("c", "")
             if len(value) == 1 and ord(value) in encoding:
                 char["_glyph_name"] = encoding[ord(value)]
+        # A tall double norm delimiter is built from repeated vertical
+        # extension pieces.  Once the embedded font program has verified every
+        # piece as ``vextenddouble``, expose one semantic glyph spanning the
+        # complete stack.  Keeping the raw control characters would either
+        # drop the delimiter or render three literal bars.
+        pieces = span.get("chars", [])
+        if pieces and all(char.get("_glyph_name") == "vextenddouble" for char in pieces):
+            first = dict(pieces[0])
+            first["c"] = "∥"
+            first["bbox"] = span["bbox"]
+            first["origin"] = (span["bbox"][0], pieces[-1].get("origin", (0, span["bbox"][3]))[1])
+            span["chars"] = [first]
+            span["text"] = "∥"
 
 
 def _atom(items: list[_Glyph], latex: str, baseline: float, size: float) -> _Glyph:
@@ -386,7 +404,7 @@ def _atom(items: list[_Glyph], latex: str, baseline: float, size: float) -> _Gly
                   baseline, size, "", latex=latex)
 
 
-def _structured_expression(glyphs: list[_Glyph], rules: list[tuple]) -> str | None:
+def _structured_expression(glyphs: list[_Glyph], rules: list[tuple], *, fragment: bool = False) -> str | None:
     """Bottom-up layout recovery using explicit PDF glyphs and vector rules.
 
     Every consumed character belongs to one validated node. Unsupported
@@ -426,6 +444,56 @@ def _structured_expression(glyphs: list[_Glyph], rules: list[tuple]) -> str | No
         if matches:
             root_bars[root] = min(matches, key=lambda rule: abs(rule[1] - root.baseline))
     fraction_bars = sorted([rule for rule in active_rules if rule not in root_bars.values()], key=lambda rule: rule[2] - rule[0])
+
+    # Inline Computer Modern sums place their upper and lower limits in two
+    # small rows immediately to the right of the extension glyph.  PyMuPDF
+    # exposes the verified Type 1 glyph name (``summationtext``), but its PDF
+    # origin is at the top of the box rather than on the surrounding equation
+    # baseline.  Build one operator atom from that explicit name and geometry
+    # before recovering an enclosing radical.  Without this step the raw font
+    # codes leak into prose as strings such as ``qPmin(m,n)``.
+    for operator in [item for item in list(items)
+                     if item.name in {"summationtext", "summationdisplay"}]:
+        small = [item for item in items if item is not operator and item.size <= operator.size * .86
+                 and operator.x1 - operator.size * .08 <= item.x0 <= operator.x1 + operator.size * 4.5]
+        if not small:
+            continue
+        center_y = (operator.y0 + operator.y1) / 2
+
+        def contiguous(candidates: list[_Glyph]) -> list[_Glyph]:
+            row = []
+            for item in sorted(candidates, key=lambda glyph: glyph.x0):
+                if not row:
+                    if item.x0 - operator.x1 > operator.size * .30:
+                        continue
+                    row.append(item)
+                elif (abs(item.baseline - row[-1].baseline) <= operator.size * .16
+                      and -.12 * operator.size <= item.x0 - row[-1].x1 <= operator.size * .35):
+                    row.append(item)
+                else:
+                    break
+            return row
+
+        upper = contiguous([item for item in small if (item.y0 + item.y1) / 2 < center_y])
+        lower = contiguous([item for item in small if (item.y0 + item.y1) / 2 > center_y])
+        upper_tex = _flat_glyphs(upper) if upper else None
+        lower_tex = _flat_glyphs(lower) if lower else None
+        if (upper and not upper_tex) or (lower and not lower_tex) or not (upper_tex or lower_tex):
+            continue
+        command = r"\sum"
+        if lower_tex:
+            command += "_{" + lower_tex + "}"
+        if upper_tex:
+            command += "^{" + upper_tex + "}"
+        consumed = [operator, *upper, *lower]
+        right = max(item.x1 for item in consumed)
+        row_neighbors = [item for item in items if item not in consumed and item.size >= operator.size * .88
+                         and right - operator.size * .08 <= item.x0 <= right + operator.size * .65
+                         and "CMEX" not in item.font.upper()]
+        baseline = min(row_neighbors, key=lambda item: item.x0).baseline if row_neighbors else operator.y1
+        atom = _atom(consumed, command, baseline, operator.size)
+        items = [item for item in items if item not in consumed] + [atom]
+
     for _ in range(min(64, len(items) + len(active_rules))):
         changed = False
         for accent in list(items):
@@ -450,7 +518,7 @@ def _structured_expression(glyphs: list[_Glyph], rules: list[tuple]) -> str | No
             x0, y, x1 = rule
             radicand = [item for item in items if item != root and
                         x0 - size * .12 <= (item.x0 + item.x1) / 2 <= x1 + size * .12 and
-                        y + size * .15 <= item.baseline <= y + max(size * 1.1, root.y1 - y + size * .2)]
+                        y + size * .15 <= item.baseline <= y + max(size * 1.6, root.y1 - y + size * .2)]
             value = _flat_glyphs(radicand) if radicand else None
             if value:
                 local_size = max(item.size for item in radicand)
@@ -505,7 +573,8 @@ def _structured_expression(glyphs: list[_Glyph], rules: list[tuple]) -> str | No
             break
         if not changed:
             break
-    return _flat_glyphs(items) or _continued_rows(items)
+    return (_flat_glyphs(items, continuation=fragment, allow_trailing=fragment)
+            or _continued_rows(items))
 
 
 def _continued_rows(glyphs: list[_Glyph]) -> str | None:
@@ -546,8 +615,9 @@ def _continued_rows(glyphs: list[_Glyph]) -> str | None:
     return r"\begin{aligned}" + r"\\".join("&" + value for value in values) + r"\end{aligned}"
 
 
-def recover_expression(spans: list[dict], *, numbered: bool = False) -> str | None:
-    simple = _recover_flat_expression(spans, numbered=numbered)
+def recover_expression(spans: list[dict], *, numbered: bool = False,
+                       fragment: bool = False) -> str | None:
+    simple = _recover_flat_expression(spans, numbered=numbered, fragment=fragment)
     if simple:
         return simple
     if not spans or any(span.get("text", "").strip() and not span.get("chars") for span in spans):
@@ -572,7 +642,7 @@ def recover_expression(spans: list[dict], *, numbered: bool = False) -> str | No
            max((item.x1 for item in glyphs), default=0), max((item.y1 for item in glyphs), default=0))
     rules = [rule for group in groups.values() for rule in group
              if rule[0] >= box[0] - 2 and rule[2] <= box[2] + 2 and box[1] - 2 <= rule[1] <= box[3] + 2]
-    result = _structured_expression(glyphs, rules)
+    result = _structured_expression(glyphs, rules, fragment=fragment)
     if result and numbered and not re.search(r"[=<>]|\\(?:le|ge|ne|in|sim|to)\b", result):
         return None
     if result and number:
@@ -665,6 +735,7 @@ def _protect_inline_translation(paragraph: dict, lines: list) -> None:
     result = []
     slots = []
     slot_spans = []
+    slot_runs = []
     active = None
     for line in lines:
         chunks = []
@@ -688,6 +759,7 @@ def _protect_inline_translation(paragraph: dict, lines: list) -> None:
                 active = {"id": f"m-{number}", "placeholder": f"⟦FOLIO_MATH_{number}⟧", "source": []}
                 slots.append(active)
                 slot_spans.append([])
+                slot_runs.append([])
                 result.append(active["placeholder"])
             box = [round(min(span["bbox"][0] for span in spans), 3),
                    round(min(span["bbox"][1] for span in spans), 3),
@@ -707,11 +779,16 @@ def _protect_inline_translation(paragraph: dict, lines: list) -> None:
                 box[1] = round(min(span["bbox"][1] for span in ordinary), 3)
             active["source"].append({"page": paragraph["page"], "bbox": box})
             slot_spans[len(slots) - 1].extend(spans)
+            slot_runs[len(slots) - 1].append(spans)
     if not slots:
         return
-    for slot, spans in zip(slots, slot_spans):
+    for slot, spans, runs in zip(slots, slot_spans, slot_runs):
         slot["source_text"] = _span_text(spans).strip()
         latex = recover_expression(spans)
+        if not latex and len(runs) > 1:
+            fragments = [recover_expression(run, fragment=True) for run in runs]
+            if all(fragments):
+                latex = "".join(fragments)
         if latex:
             slot["latex"] = latex
     from .pdf_parser import _join_lines

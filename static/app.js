@@ -1039,6 +1039,67 @@ function closePaperChat(reset = false) {
   }
 }
 
+function appendChatInline(target, value) {
+  value = String(value || '');
+  const pattern = /(\*\*|__)(.+?)\1|`([^`]+)`/g;
+  let offset = 0;
+  const appendText = (text) => {
+    if (!text) return;
+    const span = node('span');
+    target.append(span);
+    paragraphText(span, text);
+  };
+  for (const match of value.matchAll(pattern)) {
+    appendText(value.slice(offset, match.index));
+    const child = node(match[3] !== undefined ? 'code' : 'strong');
+    target.append(child);
+    paragraphText(child, match[3] !== undefined ? match[3] : match[2]);
+    offset = match.index + match[0].length;
+  }
+  appendText(value.slice(offset));
+}
+
+function renderChatMarkdown(element, value) {
+  element.replaceChildren();
+  const lines = String(value || '').replace(/\r\n?/g, '\n').split('\n');
+  let paragraph = [];
+  let list = null;
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    const block = node('p');
+    element.append(block);
+    appendChatInline(block, paragraph.join(' ').trim());
+    paragraph = [];
+  };
+  const closeList = () => { list = null; };
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) { flushParagraph(); closeList(); continue; }
+    const heading = /^(#{1,4})\s+(.+)$/.exec(line);
+    const bullet = /^[-*+]\s+(.+)$/.exec(line);
+    const numbered = /^\d+[.)]\s+(.+)$/.exec(line);
+    const quote = /^>\s?(.+)$/.exec(line);
+    if (heading) {
+      flushParagraph(); closeList();
+      const block = node(`h${Math.min(4, heading[1].length + 2)}`);
+      element.append(block); appendChatInline(block, heading[2]);
+    } else if (bullet || numbered) {
+      flushParagraph();
+      const tag = bullet ? 'ul' : 'ol';
+      if (!list || list.nodeName?.toLowerCase() !== tag) {
+        list = node(tag); element.append(list);
+      }
+      const item = node('li'); list.append(item); appendChatInline(item, (bullet || numbered)[1]);
+    } else if (quote) {
+      flushParagraph(); closeList();
+      const block = node('blockquote'); element.append(block); appendChatInline(block, quote[1]);
+    } else {
+      closeList(); paragraph.push(line);
+    }
+  }
+  flushParagraph();
+}
+
 function renderPaperChat() {
   const container = $('paper-chat-messages');
   if (!container) return;
@@ -1050,8 +1111,9 @@ function renderPaperChat() {
   }
   for (const message of state.chatMessages) {
     const bubble = node('div', `paper-chat-message ${message.role}${message.error ? ' error' : ''}`);
-    paragraphText(bubble, message.content);
     container.append(bubble);
+    if (message.role === 'assistant' && !message.error) renderChatMarkdown(bubble, message.content);
+    else paragraphText(bubble, message.content);
   }
   if (state.chatPending) container.append(node('div', 'paper-chat-message assistant pending', '正在阅读相关段落并组织回答…'));
   $('paper-chat-input').disabled = state.chatPending;

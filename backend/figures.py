@@ -123,8 +123,39 @@ def _regions(snapshot, should_stop=None):
     clusters = _cluster_rectangles(snapshot["drawings"], bounds, should_stop)
     for cluster in clusters:
         rect = _intersect(cluster, bounds)
+        # Page-wide drawing networks can bridge two independent figures and
+        # both of their captions. A real artwork region ends before its own
+        # caption; caption-guided bands below recover those figures separately.
+        if any(rect[1] < box[1] < rect[3] for box, _ in snapshot["captions"]):
+            continue
         if rect[2] - rect[0] >= 55 and rect[3] - rect[1] >= 38 and _area(rect) < _area(bounds) * .8:
             regions.append(rect)
+    # Captions provide a much stronger boundary than drawing proximity. This
+    # separates consecutive figures even when PDF vector paths form one giant
+    # cluster, while still joining panels that share one figure caption.
+    previous_caption_bottom = bounds[1]
+    for caption_box, _ in sorted(snapshot["captions"], key=lambda item: item[0][1]):
+        top = previous_caption_bottom + 3
+        bottom = caption_box[1] - 3
+        previous_caption_bottom = max(previous_caption_bottom, caption_box[3])
+        if bottom - top < 28:
+            continue
+        band = (bounds[0], top, bounds[2], bottom)
+        image_parts = [tuple(rect) for rect in snapshot["images"]
+                       if rect[1] >= top and rect[3] <= bottom]
+        drawing_parts = [tuple(rect) for rect in snapshot["drawings"]
+                         if rect[1] >= top and rect[3] <= bottom]
+        drawing_clusters = [rect for rect in _cluster_rectangles(drawing_parts, band, should_stop)
+                            if _area(rect) >= 300]
+        parts = [*image_parts, *drawing_clusters]
+        if not parts:
+            continue
+        guided = parts[0]
+        for part in parts[1:]:
+            guided = _union(guided, part)
+        guided = _intersect(guided, band)
+        if guided[2] - guided[0] >= 55 and guided[3] - guided[1] >= 30:
+            regions.append(guided)
     merged = []
     for candidate in sorted(regions, key=_area, reverse=True):
         if any(_area(_intersect(candidate, existing)) >= _area(candidate) * .8 for existing in merged):
@@ -204,8 +235,10 @@ def _anchors(rect, page_paras, caption):
             overlap = max(0, min(bbox[2], rect[2]) - max(bbox[0], rect[0]))
             if bbox[1] >= rect[3] - 3 and overlap >= min(bbox[2] - bbox[0], rect[2] - rect[0]) * .25:
                 following.append((bbox[1] - rect[3], index, paragraph))
-    caption_index = next((i for i, p in enumerate(page_paras) if caption and
-                          (caption[:45].lower() in p["text"].lower() or p["text"][:45].lower() in caption.lower())), None)
+    caption_index = next((i for i, p in enumerate(page_paras)
+                          if caption and CAPTION.match(p["text"].strip())
+                          and (caption[:45].lower() in p["text"].lower()
+                               or p["text"][:45].lower() in caption.lower())), None)
     if caption_index is not None:
         before_index = caption_index
     elif following:
