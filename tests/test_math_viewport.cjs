@@ -210,6 +210,7 @@ async function main() {
   assert.ok(markdownBubble.textContent.includes('<script>alert(1)</script>'));
   assert.ok(!walk(markdownBubble).some((item) => item.nodeName === 'SCRIPT'), 'model HTML stays inert text');
   assert.ok(!markdownBubble.textContent.includes('**'), 'Markdown markers do not leak into the answer');
+  assert.ok(formulas(markdownBubble).length >= 2, 'the completed Q&A message tree keeps formulas rendered');
   const search = paragraph('');
   context.element = search;
   vm.runInContext("state.search = 'x'; paragraphText(element, 'Find x in $x_t$ and $x_0$, without splitting formulas.');", context);

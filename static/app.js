@@ -1,6 +1,6 @@
 import { initAppearance } from './appearance.js';
 import { initLayout } from './layout.js';
-import { normalizeMathText, renderMath, splitMathText, clearMathObservations, pruneMathObservations } from './math.js?v=viewport-scroll-7';
+import { normalizeMathText, renderMath, splitMathText, clearMathObservations, pruneMathObservations } from './math.js?v=viewport-scroll-8';
 
 const $ = (id) => document.getElementById(id);
 const icon = (name) => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -1098,6 +1098,10 @@ function renderChatMarkdown(element, value) {
     }
   }
   flushParagraph();
+  // Render the completed message tree as well as its individual text spans.
+  // This catches formulas surrounded by Markdown nodes and also gives a newly
+  // loaded math renderer one connected target to retry.
+  renderMath(element);
 }
 
 function renderPaperChat() {

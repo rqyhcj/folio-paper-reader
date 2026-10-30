@@ -592,15 +592,25 @@ def _continued_rows(glyphs: list[_Glyph]) -> str | None:
             rows.append([item])
         else:
             rows[-1].append(item)
-    if not 2 <= len(rows) <= 5:
+    # Appendix proofs commonly use six or more aligned rows.  Keep an upper
+    # bound so a table column cannot be mistaken for one derivation, while
+    # allowing ordinary long inequality chains to remain selectable LaTeX.
+    if not 2 <= len(rows) <= 12:
         return None
     if any(not size * .65 <= bottom[0].baseline - top[0].baseline <= size * 2.2
            for top, bottom in zip(rows, rows[1:])):
         return None
     relation = lambda item: item.char in "=<>≈≃≅≠≤≥≪≫∈∉∼∝→↔⇒⇔" and bool(item.char)
-    if not any(relation(item) for item in rows[0]):
+    first_has_relation = any(relation(item) for item in rows[0])
+    continuation_starts = [relation(min(row, key=lambda item: item.x0)) for row in rows[1:]]
+    # TeX frequently wraps a long derivation immediately after its left-hand
+    # side, putting the first ``=`` at the beginning of the second physical
+    # row.  This is still an unambiguous aligned chain when every following row
+    # starts with a relation.  Requiring a relation on the first row forced
+    # these fully selectable proofs into the source-image fallback.
+    if not all(continuation_starts):
         return None
-    if any(not relation(min(row, key=lambda item: item.x0)) for row in rows[1:]):
+    if not first_has_relation and min(rows[1], key=lambda item: item.x0).char != "=":
         return None
     for item in glyphs:
         if item in main:

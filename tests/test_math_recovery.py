@@ -70,6 +70,17 @@ def test_verified_cmex_radical_sum_and_limits_recover_without_raw_font_codes():
         r"\sqrt{\sum_{i=r+1}^{\operatorname{min}(m,n)}\sigma _{i}^{2}}")
 
 
+def test_wrapped_derivation_with_left_side_on_first_row_recovers_as_aligned_latex():
+    spans = [span("x", 100, y=100, font="CMMI10"),
+             span("=y", 90, y=114, font="CMMI10"),
+             span("≤z", 90, y=128, font="CMMI10"),
+             span("≤u", 90, y=142, font="CMMI10"),
+             span("≤v", 90, y=156, font="CMMI10"),
+             span("≤w", 90, y=170, font="CMMI10")]
+    assert recover_expression(spans, numbered=True) == (
+        r"\begin{aligned}&x\\&=y\\&\le z\\&\le u\\&\le v\\&\le w\end{aligned}")
+
+
 def test_geometric_hat_is_attached_to_its_bold_variable_instead_of_becoming_an_image():
     spans = [span("ˆ", 12, y=97.5, font="CMR10"), span("X", 10, font="CMMIB10")]
     assert keep_span_characters(spans[0])
