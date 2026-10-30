@@ -32,12 +32,13 @@ from .providers import PROVIDERS, requires_key
 from .figures import extract_figures
 from .pdf_export import export_pdf
 from .math_html import offline_math_assets
-from .page_view import equation_png, router as page_view_router
+from .page_view import router as page_view_router
 from .pdf_runtime import PDF_LOCK
 from .translation_input import paragraph_input, validate_translation
 from .structured_content import rows_for, structure_html, structure_markdown, translate_structure
 from .ai_layout import analyze_page
 from .layout_update import apply_layout_update
+from .paper_chat import answer_paper
 
 jobs: dict[str, asyncio.Task] = {}
 figure_jobs: dict[str, asyncio.Task] = {}
@@ -115,6 +116,17 @@ class AnalyzeInput(BaseModel):
     vision: bool = False
     model: str | None = Field(default=None, max_length=150)
     translate_after: bool = True
+
+
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=6000)
+
+
+class PaperChatInput(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    page: int | None = Field(default=None, ge=1, le=500)
+    history: list[ChatTurn] = Field(default_factory=list, max_length=8)
 
 
 def paper_or_404(paper_id):
@@ -213,6 +225,13 @@ async def parse_job(paper_id: str, path: Path):
         updated.update(parse_status="completed", parse_target_version=PARSE_VERSION)
         updated.pop("parse_error", None)
         updated.pop("parse_attempt_version", None)
+        # Page proposals are fingerprinted against the old source blocks. A
+        # successful local parser upgrade supersedes their stale status and
+        # lets the reader start a fresh, partially tolerant AI pass.
+        for key in ("ai_layout_status", "ai_layout_error", "ai_layout_request", "ai_layout_progress",
+                    "ai_layout_applied_pages", "ai_layout_done_pages", "ai_layout_regions",
+                    "ai_layout_warnings"):
+            updated.pop(key, None)
         db.save_paper(updated)
         ensure_figures(updated, raw)
     except asyncio.CancelledError:
@@ -427,6 +446,24 @@ async def get_paper(paper_id: str):
     return ensure_figures(ensure_current_parse(paper_or_404(paper_id)))
 
 
+@app.post("/api/papers/{paper_id}/chat")
+async def paper_chat(paper_id: str, payload: PaperChatInput):
+    paper = paper_or_404(paper_id)
+    if payload.page and payload.page > paper.get("page_count", 1):
+        raise HTTPException(400, "当前论文没有这个页码。")
+    config = merged_settings(SettingsInput())
+    if requires_key(config) and not config.get("api_key"):
+        raise HTTPException(400, "请先在 API 设置中填写密钥。")
+    try:
+        answer = await answer_paper(
+            paper, payload.question.strip(), config, page=payload.page,
+            history=[item.model_dump() for item in payload.history],
+        )
+    except TranslationError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return {"answer": answer, "model": config["model"], "page": payload.page}
+
+
 async def translation_job(paper_id: str, config: dict, paragraph_ids: list[str] | None = None):
     try:
         initial = paper_or_404(paper_id)
@@ -612,7 +649,7 @@ async def start_analysis(paper_id: str, payload: AnalyzeInput = AnalyzeInput()):
                "parse_version": paper.get("parse_version")}
     resume = paper.get("ai_layout_status") in {"paused", "error"} and paper.get("ai_layout_request") == request
     if not resume:
-        paper.update(ai_layout_applied_pages=[], ai_layout_done_pages=[])
+        paper.update(ai_layout_applied_pages=[], ai_layout_done_pages=[], ai_layout_warnings=[])
     done = [p for p in paper.get("ai_layout_done_pages", []) if p in pages]
     paper.update(ai_layout_status="running", ai_layout_error=None, ai_layout_request=request,
                  ai_layout_progress={"done": len(done), "total": len(pages), "page": next((p for p in pages if p not in done), pages[-1])})
@@ -637,8 +674,11 @@ async def layout_job(paper_id: str, config: dict, payload: AnalyzeInput, pages: 
             paper["ai_layout_progress"] = {"done": len(paper.get("ai_layout_done_pages", [])), "total": len(pages), "page": number}
             db.save_paper(paper)
             if number not in paper.get("ai_layout_applied_pages", []) and any(p.get("page") == number for p in paper["paragraphs"]):
-                proposal = await analyze_page(paper, number, raw, config, vision=payload.vision)
+                proposal = await analyze_page(paper, number, raw, config, vision=payload.vision, tolerant=True)
                 updated = apply_layout_update(paper_or_404(paper_id), proposal)
+                page_warnings = [f"第 {number} 页：{message}" for message in proposal.get("warnings", [])]
+                updated["ai_layout_warnings"] = list(dict.fromkeys(
+                    [*updated.get("ai_layout_warnings", []), *page_warnings]))[-100:]
                 # Re-extract only this page using the validated model regions.
                 # The generated prefix cannot overwrite existing page images.
                 crop_worker = asyncio.create_task(asyncio.to_thread(
@@ -733,7 +773,6 @@ def original(paper_id: str):
 @app.get("/api/papers/{paper_id}/export")
 async def export(paper_id: str, format: str = "markdown"):
     from .inline_math_export import html_with_math, text_with_math
-    from .page_view import inline_math_png
 
     paper = paper_or_404(paper_id)
     if format not in ("markdown", "html", "pdf"):
@@ -750,28 +789,9 @@ async def export(paper_id: str, format: str = "markdown"):
             await asyncio.shield(task)
         paper = paper_or_404(paper_id)
     title = paper["title"]
-    equation_paths = {}
-    inline_paths = {}
-    if format in ("pdf", "html"):
-        for paragraph in paper["paragraphs"]:
-            if paragraph.get("math_status") == "source-image":
-                try:
-                    equation_paths[paragraph["id"]] = await asyncio.to_thread(equation_png, paper, paragraph["id"])
-                except Exception:
-                    # Exporters render a readable placeholder when the original crop is unavailable.
-                    pass
-            for slot in paragraph.get("inline_math") or []:
-                if slot.get("latex"):
-                    continue
-                for index, _ in enumerate(slot.get("source") or []):
-                    try:
-                        inline_paths[(paragraph["id"], slot["id"], index)] = await asyncio.to_thread(
-                            inline_math_png, paper, paragraph["id"], slot["id"], index)
-                    except Exception:
-                        pass
     if format == "pdf":
         paths = {f["id"]: figure_dir(paper_id) / f"{f['id']}.png" for f in paper.get("figures", [])}
-        content = await asyncio.to_thread(export_pdf, paper, paths, equation_paths, inline_paths)
+        content = await asyncio.to_thread(export_pdf, paper, paths)
         media, extension = "application/pdf", "pdf"
     elif format == "html":
         sections = []
@@ -796,24 +816,20 @@ async def export(paper_id: str, format: str = "markdown"):
             tag = "h2" if p["kind"] == "heading" else "p"
             section = "".join(image_html(f) for f in paper.get("figures", []) if f.get("before_paragraph_id") == p["id"])
             if rows_for(p):
-                translated = structure_html(p, translated=True) or f'<p class="zh">{html_with_math(p, p.get("translation") or "[尚未翻译]", inline_paths)}</p>'
+                translated = structure_html(p, translated=True) or f'<p class="zh">{html_with_math(p, p.get("translation") or "[尚未翻译]")}</p>'
                 section += f'<section class="structured-block">{structure_html(p)}{translated}</section>'
             elif p.get("kind") == "equation" or p.get("math_status") == "source-image":
                 if p.get("math_status") == "source-image":
-                    path = equation_paths.get(p["id"])
-                    if path is not None and path.is_file():
-                        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-                        equation = f'<img style="max-width:100%;height:auto" src="data:image/png;base64,{encoded}" alt="原文片段与数学公式">'
-                    else:
-                        equation = "<p>[公式原图未能导出，请查看原始 PDF]</p>"
+                    equation = (f'<p class="en equation-source-text">{html.escape(p.get("text") or "[公式文字待识别]")}</p>'
+                                '<small>[该公式尚未恢复为 LaTeX，可在原始 PDF 中核对]</small>')
                 else:
                     equation = f'<p class="en">{html.escape(p["text"])}</p>'
                 section += f'<section class="equation">{equation}</section>'
                 if p.get("kind") != "equation":
-                    section += f'<p class="zh">{html_with_math(p, p.get("translation") or "[尚未翻译]", inline_paths)}</p>'
+                    section += f'<p class="zh">{html_with_math(p, p.get("translation") or "[尚未翻译]")}</p>'
             else:
-                source = html_with_math(p, p.get("translation_text") or p["text"], inline_paths) if p.get("math_status") == "source-inline" else html.escape(p["text"])
-                section += f'<section><{tag} class="en">{source}</{tag}><p class="zh">{html_with_math(p, p.get("translation") or "[尚未翻译]", inline_paths)}</p></section>'
+                source = html_with_math(p, p.get("translation_text") or p["text"]) if p.get("math_status") == "source-inline" else html.escape(p["text"])
+                section += f'<section><{tag} class="en">{source}</{tag}><p class="zh">{html_with_math(p, p.get("translation") or "[尚未翻译]")}</p></section>'
             for f in paper.get("figures", []):
                 if not f.get("before_paragraph_id") and f.get("after_paragraph_id") == p["id"]:
                     section += image_html(f)

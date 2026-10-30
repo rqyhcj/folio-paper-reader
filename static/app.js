@@ -12,6 +12,7 @@ const state = {
   blocks: new Map(), figures: new Map(), outlineSignature: '', scrollFrame: null,
   readingBlocks: [], outlineItems: [], outlineTargets: [], activeOutline: null,
   aiDialogPaperId: null, aiRequestPending: false,
+  chatPaperId: null, chatMessages: [], chatPending: false,
 };
 
 function node(tag, className, text) {
@@ -307,6 +308,7 @@ function displayPaper(paper, fresh = false) {
     || Number(paper.ai_layout_revision || 0) !== Number(state.paper?.ai_layout_revision || 0));
   const readingPosition = reparsed ? captureReparsePosition() : null;
   state.paper = paper;
+  if (newDocument && typeof closePaperChat === "function") closePaperChat(true);
   if (wasDemo) state.paper.is_demo = true;
   const signatures = {
     metadata: JSON.stringify([paper.id, paper.title, paper.filename, paper.created_at,
@@ -316,7 +318,7 @@ function displayPaper(paper, fresh = false) {
     outline: JSON.stringify([paper.id, paper.outline]),
     translation: JSON.stringify([paper.id, paper.status, paper.error, paper.progress,
       paper.paragraph_count, paper.translated_count, state.bilingual, paper.parse_status, paper.parse_error,
-      paper.ai_layout_status, paper.ai_layout_progress, paper.ai_layout_error]),
+      paper.ai_layout_status, paper.ai_layout_progress, paper.ai_layout_error, paper.ai_layout_warnings]),
     artwork: JSON.stringify([paper.id, paper.figure_status, paper.figure_progress, paper.page_count]),
   };
   const previous = state.displaySignatures || {};
@@ -461,25 +463,14 @@ function translatedParagraphText(element, text, paragraph) {
       appendText(`\\(${formula.latex}\\)`);
     } else {
       const group = node('span', 'inline-source-math');
-      group.setAttribute('aria-label', '原文数学公式');
-      for (const [index, piece] of (formula.source || []).entries()) {
-        const box = piece.bbox || [];
-        const revision = [state.paper.parse_version || 1, piece.page, ...box].join(',');
-        const url = `/api/papers/${encodeURIComponent(state.paper.id)}/inline-math/${encodeURIComponent(paragraph.id)}/${encodeURIComponent(formula.id)}/${index}.png?v=${encodeURIComponent(revision)}`;
-        const link = node('a', 'inline-source-link');
-        link.href = url; link.target = '_blank'; link.rel = 'noopener'; link.title = '查看原文公式';
-        const image = document.createElement('img');
-        image.alt = '原式'; image.loading = 'lazy'; image.decoding = 'async';
-        if (box.length === 4 && box.every(Number.isFinite)) {
-          image.width = Math.max(1, Math.round(box[2] - box[0]));
-          image.height = Math.max(1, Math.round(box[3] - box[1]));
-          image.style.width = `${Math.max(1, box[2] - box[0]) / 11}em`;
-        }
-        image.addEventListener('error', () => { image.hidden = true; link.textContent = '查看原式 ↗'; });
-        image.src = url;
-        link.append(image); group.append(link);
-      }
-      if (!group.childNodes.length) group.append(document.createTextNode('〔原式缺失，请查看原 PDF〕'));
+      group.setAttribute('aria-label', '待恢复为 LaTeX 的原文数学公式');
+      const sourceText = String(formula.source_text || '〔待识别公式〕').trim();
+      group.append(node('span', 'inline-extracted-math', sourceText));
+      const sourcePage = formula.source?.[0]?.page || paragraph.page || 1;
+      const link = node('a', 'inline-source-link', '核对原 PDF ↗');
+      link.href = `/api/papers/${encodeURIComponent(state.paper.id)}/original#page=${encodeURIComponent(sourcePage)}`;
+      link.target = '_blank'; link.rel = 'noopener'; link.title = '在原始 PDF 中核对公式';
+      group.append(link);
       element.append(group);
     }
     offset = match.index + match[0].length;
@@ -567,9 +558,6 @@ function renderParagraphs(force = false) {
       block.dataset.paragraphId = id;
       block.dataset.level = paragraph.level || 1;
       block.dataset.page = paragraph.page || 1;
-      const pageLabel = node('span', 'paragraph-page', `P.${paragraph.page || 1}`);
-      pageLabel.hidden = !isPdfPaper(state.paper);
-      block.append(pageLabel);
       block.append(node(paragraph.kind === 'heading' ? 'h2' : 'div', 'paragraph-original'));
       block.append(node('div', 'paragraph-translation'));
       state.blocks.set(id, block);
@@ -592,7 +580,7 @@ function renderParagraphs(force = false) {
     const original = block.querySelector('.paragraph-original');
     const structured = structuredParagraphText(original, paragraph);
     if (!structured) delete original.dataset.structureSignature;
-    const sourceEquation = !structured && paragraph.math_status === 'source-image' && paragraph.equation_image;
+    const sourceEquation = !structured && paragraph.math_status === 'source-image';
     original.classList.toggle('has-equation-source', !!sourceEquation);
     if (sourceEquation) renderEquationSource(original, paragraph);
     else if (!structured) {
@@ -606,7 +594,7 @@ function renderParagraphs(force = false) {
       }
       if (paragraph.math_status === 'latex' && paragraph.equation_source && !original.querySelector('.equation-original-link')) {
         const source = node('a', 'equation-original-link', paragraph.ai_reconstructed ? 'AI 识别 · 对照原式 ↗' : '查看原式 ↗');
-        source.href = `/api/papers/${encodeURIComponent(state.paper.id)}/equations/${encodeURIComponent(paragraph.id)}.png`;
+        source.href = `/api/papers/${encodeURIComponent(state.paper.id)}/original#page=${encodeURIComponent(paragraph.equation_source?.page || paragraph.page || 1)}`;
         source.target = '_blank';
         source.rel = 'noopener';
         original.append(source);
@@ -674,46 +662,22 @@ function renderParagraphs(force = false) {
 }
 
 function renderEquationSource(element, paragraph) {
-  const signature = JSON.stringify([state.paper.id, state.paper.parse_version, paragraph.id, paragraph.text, paragraph.equation_image, paragraph.equation_source, paragraph.ambiguous_inline_math]);
+  const signature = JSON.stringify([state.paper.id, state.paper.parse_version, paragraph.id, paragraph.text, paragraph.equation_source, paragraph.ambiguous_inline_math]);
   if (element.dataset.equationSignature === signature) return;
   element.dataset.equationSignature = signature;
   delete element.dataset.inlineSignature;
   delete element.dataset.textSignature;
   delete element.dataset.mathSearchHit;
   element.replaceChildren();
-  const regionVersion = [state.paper.parse_version || 1, paragraph.equation_source?.page || paragraph.page, ...(paragraph.equation_source?.bbox || [])].join(',');
-  const url = `/api/papers/${encodeURIComponent(state.paper.id)}/equations/${encodeURIComponent(paragraph.id)}.png?v=${encodeURIComponent(regionVersion)}`;
-  const link = node('a', 'equation-source-link');
-  link.href = url;
+  const extracted = node('div', 'equation-extracted-text');
+  paragraphText(extracted, paragraph.text || '〔公式文字待识别〕');
+  const note = node('small', 'equation-source-note', '已保留可选择的抽取文字；可用「AI 整理」恢复为标准 LaTeX。');
+  const link = node('a', 'equation-original-link', '核对原 PDF ↗');
+  link.href = `/api/papers/${encodeURIComponent(state.paper.id)}/original#page=${encodeURIComponent(paragraph.equation_source?.page || paragraph.page || 1)}`;
   link.target = '_blank';
   link.rel = 'noopener';
-  const sourceLabel = paragraph.ambiguous_inline_math ? '原文片段' : '原式';
-  const sourceNote = paragraph.ambiguous_inline_math ? '原文片段（含复杂公式，保留原图）' : '原式（复杂公式保留原图）';
-  link.title = `在新窗口查看${sourceLabel}`;
-  const image = document.createElement('img');
-  image.loading = 'lazy';
-  image.decoding = 'async';
-  image.alt = `第 ${paragraph.page || 1} 页的${sourceLabel}`;
-  const dimensions = paragraph.equation_image;
-  if (Number(dimensions.width) > 0 && Number(dimensions.height) > 0) {
-    image.width = Math.min(10000, Number(dimensions.width));
-    image.height = Math.min(10000, Number(dimensions.height));
-    // PDF coordinates are points; scale the source glyphs with the reader text.
-    image.style.width = `${Math.min(10000, Number(dimensions.width)) / 11}em`;
-  }
-  const note = node('small', 'equation-source-note');
-  const noteText = node('span', '', sourceNote);
-  note.append(noteText, imageRetryButton(image, url));
-  image.addEventListener('error', () => { image.hidden = true; noteText.textContent = `${sourceLabel}图片暂未加载，可重试或打开原版 PDF 查看。`; });
-  image.addEventListener('load', () => { image.hidden = false; noteText.textContent = sourceNote; });
-  image.src = url;
-  link.append(image);
-  element.append(link, note);
-  if (paragraph.text) {
-    const details = node('details', 'equation-extracted-source');
-    details.append(node('summary', '', '查看抽取文字'), node('code', '', paragraph.text));
-    element.append(details);
-  }
+  note.append(link);
+  element.append(extracted, note);
 }
 
 function imageRetryButton(image, url) {
@@ -933,17 +897,21 @@ function renderTranslationStatus() {
   const aiStatus = paper.ai_layout_status;
   const aiError = aiStatus === 'error';
   const aiPaused = aiStatus === 'paused';
+  const aiWarnings = Array.isArray(paper.ai_layout_warnings) ? paper.ai_layout_warnings : [];
+  const aiCompletedWithWarnings = aiStatus === 'completed' && aiWarnings.length > 0;
   const aiBanner = $('ai-layout-banner');
-  aiBanner.hidden = !aiRunning && !aiError && !aiPaused;
+  aiBanner.hidden = !aiRunning && !aiError && !aiPaused && !aiCompletedWithWarnings;
   aiBanner.classList.toggle('has-error', aiError);
   aiBanner.classList.toggle('running', aiRunning);
   const progress = paper.ai_layout_progress || {};
   const page = Math.max(1, Number(progress.page) || 1);
   const totalPages = Math.max(0, Number(progress.total) || 0);
   const finishedPages = Math.min(totalPages, Math.max(0, Number(progress.done) || 0));
-  $('ai-layout-status').textContent = aiRunning ? `AI 正在整理第 ${page} 页` : aiPaused ? 'AI 整理已暂停' : aiError ? 'AI 整理暂未完成' : '';
+  $('ai-layout-status').textContent = aiRunning ? `AI 正在整理第 ${page} 页` : aiPaused ? 'AI 整理已暂停' : aiError ? 'AI 整理暂未完成' : aiCompletedWithWarnings ? 'AI 整理已完成' : '';
   $('ai-layout-detail').textContent = aiError ? (paper.ai_layout_error || '当前页识别未通过，已完成部分已保留，可重新选择范围重试。')
-    : `${finishedPages} / ${totalPages} 页 · ${aiPaused ? '已完成部分已保存，可重新选择剩余范围' : '可继续阅读已完成部分'}`;
+    : aiCompletedWithWarnings ? `${aiWarnings.length} 项未可靠识别的内容已局部保留原文；可对这些页面再次使用视觉识别。`
+      : `${finishedPages} / ${totalPages} 页 · ${aiPaused ? '已完成部分已保存，可重新选择剩余范围' : '可继续阅读已完成部分'}`;
+  $('ai-layout-detail').title = aiWarnings.join('\n');
   $('ai-layout-pause').hidden = !aiRunning;
   $('ai-layout-pause').disabled = !!state.aiRequestPending;
 }
@@ -991,8 +959,8 @@ function openAiLayout() {
   $('ai-layout-scope').value = 'page';
   $('ai-layout-page').value = String(page);
   $('ai-layout-page').max = String(Math.max(1, Number(paper.page_count) || 1));
-  $('ai-mode-text').checked = true;
-  $('ai-mode-vision').checked = false;
+  $('ai-mode-text').checked = false;
+  $('ai-mode-vision').checked = true;
   $('ai-layout-translate').checked = true;
   $('ai-layout-message').hidden = true;
   setAiLayoutBusy(false);
@@ -1055,6 +1023,87 @@ async function pauseAiLayout() {
     state.aiRequestPending = false;
     $('ai-layout-pause').textContent = '暂停整理';
     if (state.paper?.id === id) renderTranslationStatus();
+  }
+}
+
+function closePaperChat(reset = false) {
+  $('paper-chat-panel').hidden = true;
+  $('paper-chat-backdrop').hidden = true;
+  $('paper-chat-button').setAttribute('aria-expanded', 'false');
+  if (reset) {
+    state.chatPaperId = null;
+    state.chatMessages = [];
+    state.chatPending = false;
+    if ($('paper-chat-input')) $('paper-chat-input').value = '';
+    renderPaperChat();
+  }
+}
+
+function renderPaperChat() {
+  const container = $('paper-chat-messages');
+  if (!container) return;
+  container.replaceChildren();
+  if (!state.chatMessages.length && !state.chatPending) {
+    const empty = node('div', 'paper-chat-empty');
+    empty.innerHTML = `${icon('chat')}<strong>从论文出发，问得具体一点。</strong><span>例如：作者为什么要引入低秩分支？</span>`;
+    container.append(empty);
+  }
+  for (const message of state.chatMessages) {
+    const bubble = node('div', `paper-chat-message ${message.role}${message.error ? ' error' : ''}`);
+    paragraphText(bubble, message.content);
+    container.append(bubble);
+  }
+  if (state.chatPending) container.append(node('div', 'paper-chat-message assistant pending', '正在阅读相关段落并组织回答…'));
+  $('paper-chat-input').disabled = state.chatPending;
+  $('paper-chat-send').disabled = state.chatPending;
+  requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
+}
+
+function openPaperChat() {
+  if (!state.paper) return;
+  if (!isModelConfigured()) {
+    openSettings();
+    settingsMessage('请先连接一个模型，再使用论文问答。');
+    return;
+  }
+  if (state.chatPaperId !== state.paper.id) {
+    state.chatPaperId = state.paper.id;
+    state.chatMessages = [];
+  }
+  $('paper-chat-panel').hidden = false;
+  $('paper-chat-backdrop').hidden = false;
+  $('paper-chat-button').setAttribute('aria-expanded', 'true');
+  renderPaperChat();
+  $('paper-chat-input').focus();
+}
+
+async function askPaper(question) {
+  question = String(question || '').trim();
+  if (!question || state.chatPending || !state.paper) return;
+  const paperId = state.paper.id;
+  if (state.chatPaperId !== paperId) {
+    state.chatPaperId = paperId;
+    state.chatMessages = [];
+  }
+  const history = state.chatMessages.slice(-8).map(({ role, content }) => ({ role, content }));
+  state.chatMessages.push({ role: 'user', content: question });
+  state.chatPending = true;
+  $('paper-chat-input').value = '';
+  renderPaperChat();
+  const position = state.readMode === 'pdf' ? state.originalPage : captureReparsePosition()?.page;
+  try {
+    const result = await api(`/papers/${encodeURIComponent(paperId)}/chat`, {
+      method: 'POST', body: JSON.stringify({ question, page: Math.max(1, Number(position) || 1), history }),
+    });
+    if (state.chatPaperId === paperId) state.chatMessages.push({ role: 'assistant', content: result.answer });
+  } catch (error) {
+    if (state.chatPaperId === paperId) state.chatMessages.push({ role: 'assistant', content: error.message, error: true });
+  } finally {
+    if (state.chatPaperId === paperId) {
+      state.chatPending = false;
+      renderPaperChat();
+      $('paper-chat-input').focus();
+    }
   }
 }
 
@@ -1675,6 +1724,16 @@ function wireEvents() {
     $(id).addEventListener('change', updateAiLayoutDescription);
   }
   $('ai-layout-dialog').addEventListener('cancel', (event) => { if (state.aiRequestPending) event.preventDefault(); });
+  $('paper-chat-button').addEventListener('click', openPaperChat);
+  $('paper-chat-close').addEventListener('click', () => closePaperChat());
+  $('paper-chat-backdrop').addEventListener('click', () => closePaperChat());
+  $('paper-chat-form').addEventListener('submit', (event) => { event.preventDefault(); askPaper($('paper-chat-input').value); });
+  $('paper-chat-input').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); askPaper(event.currentTarget.value); }
+  });
+  for (const button of document.querySelectorAll('.paper-chat-prompts button')) {
+    button.addEventListener('click', () => { openPaperChat(); askPaper(button.textContent); });
+  }
   $('retry-failed').addEventListener('click', () => translatePaper(true));
   $('font-minus').addEventListener('click', () => setFontSize(state.fontSize - 1));
   $('font-plus').addEventListener('click', () => setFontSize(state.fontSize + 1));
@@ -1706,8 +1765,8 @@ function wireEvents() {
   $('reader-scroll').addEventListener('scroll', () => { if (state.scrollFrame) return; state.scrollFrame = requestAnimationFrame(() => { state.scrollFrame = null; updateReadingPosition(); }); }, { passive: true });
   window.addEventListener('resize', updateReadingPosition);
   document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && state.paper && state.readMode !== 'pdf' && !$('settings-dialog').open && !$('confirm-dialog').open && !$('ai-layout-dialog').open) { e.preventDefault(); openSearch(); }
-    if (e.key === 'Escape') { $('export-menu').hidden = true; closeSidebar(); if (!$('search-bar').hidden && !$('settings-dialog').open) closeSearch(); }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && state.paper && state.readMode !== 'pdf' && !$('settings-dialog').open && !$('confirm-dialog').open && !$('ai-layout-dialog').open && $('paper-chat-panel').hidden) { e.preventDefault(); openSearch(); }
+    if (e.key === 'Escape') { $('export-menu').hidden = true; closeSidebar(); closePaperChat(); if (!$('search-bar').hidden && !$('settings-dialog').open) closeSearch(); }
   });
 }
 

@@ -158,8 +158,7 @@ assert.equal(withClass(safe, 'katex').length, 2);
 assert.ok(!walk(safe).some((item) => item.nodeName === 'MARK'));
 assert.equal(safe.dataset.mathSearchHit, undefined);
 
-// Reusing a paragraph ID after reflow must fetch the new source coordinates,
-// even when its crop dimensions and extracted text have not changed.
+// Unresolved display math stays selectable and only links back to the original PDF.
 const crop = new TestNode('div');
 context.element = crop;
 context.paragraph = { id: 'p-15', page: 6, text: 'complex display',
@@ -167,15 +166,16 @@ context.paragraph = { id: 'p-15', page: 6, text: 'complex display',
   equation_image: { width: 230, height: 40 }, ambiguous_inline_math: false };
 vm.runInContext("state.paper={id:'local-paper',parse_version:4}; renderEquationSource(element, paragraph);", context);
 const firstCrop = walk(crop).find((item) => item.nodeName === 'IMG');
-const firstCropUrl = firstCrop.src;
-assert.ok(firstCropUrl.includes('.png?v='));
+assert.equal(firstCrop, undefined);
+assert.ok(crop.textContent.includes('complex display'));
+let sourceLink = walk(crop).find((item) => item.nodeName === 'A');
+assert.ok(sourceLink.href.includes('/api/papers/local-paper/original#page=6'));
 context.paragraph.equation_source.bbox = [60, 180, 290, 220];
 vm.runInContext('renderEquationSource(element, paragraph);', context);
-const changedCrop = walk(crop).find((item) => item.nodeName === 'IMG');
-assert.notEqual(changedCrop, firstCrop);
-assert.notEqual(changedCrop.src, firstCropUrl);
+sourceLink = walk(crop).find((item) => item.nodeName === 'A');
+assert.ok(sourceLink.href.includes('/api/papers/local-paper/original#page=6'));
 vm.runInContext('renderEquationSource(element, paragraph);', context);
-assert.equal(walk(crop).find((item) => item.nodeName === 'IMG'), changedCrop);
+assert.equal(walk(crop).find((item) => item.nodeName === 'IMG'), undefined);
 
 // A pure TeX provider reply without delimiters renders, while prose and paths
 // remain unchanged; no mathematical content is inferred or rewritten.
@@ -194,19 +194,20 @@ const protectedTarget = new TestNode('div');
 context.element = protectedTarget;
 context.paragraph = { id: 'p-protected', inline_math: [
   {id:'m-1', placeholder:'⟦FOLIO_MATH_1⟧', latex:'x_{t}', source:[]},
-  {id:'m-2', placeholder:'⟦FOLIO_MATH_2⟧', source:[{page:3,bbox:[310,460,450,480]},{page:3,bbox:[310,480,360,500]}]},
+  {id:'m-2', placeholder:'⟦FOLIO_MATH_2⟧', source_text:'a / b', source:[{page:3,bbox:[310,460,450,480]},{page:3,bbox:[310,480,360,500]}]},
 ] };
 context.translated = '其中 ⟦FOLIO_MATH_1⟧ 表示 <script>alert(1)</script>，其均值为 ⟦FOLIO_MATH_2⟧。';
 vm.runInContext('translatedParagraphText(element, translated, paragraph);', context);
 assert.equal(withClass(protectedTarget, 'katex').length, 1);
 const protectedImages = walk(protectedTarget).filter((item) => item.nodeName === 'IMG');
-assert.equal(protectedImages.length, 2);
-assert.ok(protectedImages.every((item) => item.src.startsWith('/api/papers/local-paper/inline-math/p-protected/m-2/')));
+assert.equal(protectedImages.length, 0);
+assert.ok(protectedTarget.textContent.includes('a / b'));
+assert.ok(protectedTarget.textContent.includes('核对原 PDF'));
 assert.ok(protectedTarget.textContent.includes('<script>alert(1)</script>'));
 assert.ok(!walk(protectedTarget).some((item) => item.nodeName === 'SCRIPT'));
 assert.ok(!protectedTarget.textContent.includes('FOLIO_MATH'));
 vm.runInContext('translatedParagraphText(element, translated, paragraph);', context);
-assert.equal(walk(protectedTarget).find((item) => item.nodeName === 'IMG'), protectedImages[0]);
+assert.equal(walk(protectedTarget).find((item) => item.nodeName === 'IMG'), undefined);
 
 // Asset references must remain local, including the stylesheet's font files.
 const index = read('static/index.html');

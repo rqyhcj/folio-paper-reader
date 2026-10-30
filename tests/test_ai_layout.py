@@ -51,10 +51,11 @@ def response(value, **choice):
     return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(value)}, **choice}]})
 
 
-def analyze(p, source, result=None, *, vision=False, handler=None):
+def analyze(p, source, result=None, *, vision=False, tolerant=False, handler=None):
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler or (lambda _: response(result)))) as client:
-            value = await layout.analyze_page(p, 1, source, SETTINGS, vision=vision, client=client)
+            value = await layout.analyze_page(p, 1, source, SETTINGS, vision=vision,
+                                              tolerant=tolerant, client=client)
             assert not client.is_closed
             return value
     return asyncio.run(run())
@@ -125,6 +126,20 @@ def test_source_changes_reject_stale_proposals_without_mutating_paper(source):
 def test_missing_duplicate_unknown_or_reordered_blocks_are_rejected(source, groups):
     with pytest.raises(layout.LayoutAnalysisError):
         analyze(paper(), source, {"groups": groups, "regions": []})
+
+
+def test_tolerant_mode_applies_valid_groups_and_locally_keeps_invalid_or_missing_blocks(source):
+    value = {"groups": [
+        {"ids": ["first", "second"], "kind": "paragraph"},
+        {"ids": ["heading"], "kind": "equation", "complete": True, "latex": "x=y"},
+    ], "regions": [{"kind": "figure", "bbox": [0, 0, 1000, 1000]}]}
+    proposal = analyze(paper(), source, value, vision=True, tolerant=True)
+    assert proposal["groups"][0]["ids"] == ["first", "second"]
+    assert proposal["groups"][0]["changed"] is True
+    assert proposal["groups"][1]["ids"] == ["heading"]
+    assert proposal["groups"][1]["changed"] is False
+    assert proposal["regions"] == []
+    assert len(proposal["warnings"]) == 2
 
 
 def test_model_cannot_replace_prose_or_merge_headings(source):

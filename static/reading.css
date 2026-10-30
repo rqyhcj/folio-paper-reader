@@ -9,11 +9,11 @@
 .retained-translation-retry { margin-top: 6px; color: var(--teal); font: 11px/1.7 var(--sans); text-decoration: underline; text-underline-offset: 3px; }
 .paragraph-original { white-space: normal; }
 .reader-help { margin: 17px 0 0; font: 12px/1.8 var(--sans); color: var(--muted); }
-.equation-source-link { display: block; width: fit-content; max-width: 100%; }
-.equation-source-link img { display: block; max-width: 100%; height: auto; background: #fff; border-radius: 3px; }
 .equation-source-note, .equation-original-link { display: block; margin-top: 5px; font: 11px/1.7 var(--sans); color: var(--muted); }
 .equation-original-link { text-align: right; }
 .equation-original-link:hover { color: var(--teal); }
+.equation-extracted-text { font-family: var(--math, "Times New Roman", serif); overflow-wrap: anywhere; white-space: pre-wrap; }
+.equation-source-note .equation-original-link { display: inline; margin-left: .7em; }
 .image-retry { margin-left: 10px; padding: 2px 5px; font: inherit; color: var(--folio-accent-ink, var(--teal)); text-decoration: underline; text-underline-offset: 3px; }
 .image-retry:disabled { opacity: .65; cursor: wait; }
 .equation-extracted-source { margin-top: 4px; font: 11px/1.7 var(--sans); color: var(--muted); }

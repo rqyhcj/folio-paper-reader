@@ -18,9 +18,9 @@
 .paragraph-original .katex-error,
 .paragraph-translation .katex-error { color: inherit !important; overflow-wrap: anywhere; }
 
-.inline-source-math { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: .12em; max-width: 100%; vertical-align: middle; margin: 0 .12em; }
-.inline-source-link { display: inline-block; max-width: 100%; line-height: 1; vertical-align: middle; }
-.inline-source-link img { display: inline-block; max-width: 100%; height: auto; vertical-align: middle; border-radius: 2px; }
+.inline-source-math { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: .35em; max-width: 100%; vertical-align: baseline; margin: 0 .12em; }
+.inline-extracted-math { font-family: var(--math, "Times New Roman", serif); overflow-wrap: anywhere; }
+.inline-source-link { color: var(--muted); font: .7em/1.4 var(--sans); text-decoration: underline; text-underline-offset: 2px; }
 .retained-translation-details { margin-top: .65em; }
 .retained-translation-details summary { cursor: pointer; font-size: .78em; color: var(--muted); }
 .retained-translation-part { margin-top: .55em; padding-left: .6em; border-left: 2px solid var(--border); }

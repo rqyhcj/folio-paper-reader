@@ -1,0 +1,32 @@
+.reader-view { position: relative; }
+.paper-chat-action { white-space: nowrap; }
+.paper-chat-backdrop { position: absolute; inset: 0; z-index: 24; background: #17231c33; backdrop-filter: blur(1px); }
+.paper-chat-panel { position: absolute; z-index: 25; inset: 0 0 0 auto; width: min(430px, calc(100% - 32px)); display: flex; flex-direction: column; min-height: 0; color: var(--text); background: var(--folio-panel, var(--canvas)); border-left: 1px solid var(--line); box-shadow: -18px 0 55px #1831291f; }
+.paper-chat-panel[hidden], .paper-chat-backdrop[hidden] { display: none; }
+.paper-chat-panel > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; padding: 25px 25px 14px; }
+.paper-chat-panel .mini-label { color: var(--muted); font: 9px/1.5 var(--sans); letter-spacing: 1.4px; }
+.paper-chat-panel h2 { margin: 5px 0 0; color: var(--ink); font: 500 23px/1.35 var(--zh-serif); }
+.paper-chat-panel > header .icon-button { color: var(--muted); }
+.paper-chat-intro { margin: 0; padding: 0 25px 15px; color: var(--muted); font: 11px/1.8 var(--sans); }
+.paper-chat-prompts { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 25px 17px; border-bottom: 1px solid var(--line); }
+.paper-chat-prompts button { padding: 6px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--folio-accent-ink, var(--teal)); background: var(--folio-panel-soft, var(--canvas)); font: 10px/1.5 var(--sans); }
+.paper-chat-prompts button:hover { border-color: var(--teal); }
+.paper-chat-messages { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 13px; padding: 20px 25px; overscroll-behavior: contain; }
+.paper-chat-empty { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; color: var(--muted); font: 11px/1.7 var(--sans); }
+.paper-chat-empty svg { width: 30px; height: 30px; color: var(--teal); opacity: .65; }
+.paper-chat-empty strong { color: var(--text); font-weight: 500; }
+.paper-chat-message { max-width: 92%; padding: 10px 13px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.8 var(--sans); }
+.paper-chat-message.user { align-self: flex-end; color: var(--ink); background: color-mix(in srgb, var(--teal) 12%, var(--folio-panel, #fff)); border-bottom-right-radius: 3px; }
+.paper-chat-message.assistant { align-self: flex-start; color: var(--text); background: var(--folio-panel-soft, var(--canvas)); border: 1px solid var(--line); border-bottom-left-radius: 3px; }
+.paper-chat-message.pending { color: var(--muted); }
+.paper-chat-message.error { color: #a45e45; border-color: color-mix(in srgb, #a45e45 35%, var(--line)); }
+.paper-chat-message .katex-display { margin: .65em 0; overflow-x: auto; overflow-y: hidden; padding-bottom: 2px; }
+.paper-chat-panel form { flex: 0 0 auto; padding: 15px 25px 22px; border-top: 1px solid var(--line); background: var(--folio-panel, var(--canvas)); }
+.paper-chat-panel form label { display: block; margin-bottom: 7px; color: var(--muted); font: 10px/1.5 var(--sans); }
+.paper-chat-panel textarea { box-sizing: border-box; width: 100%; resize: none; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; color: var(--text); background: var(--folio-control, #fff); font: 12px/1.7 var(--sans); }
+.paper-chat-panel textarea:focus { outline: 0; border-color: var(--teal); box-shadow: 0 0 0 2px color-mix(in srgb, var(--teal) 16%, transparent); }
+.paper-chat-panel form > div { display: flex; align-items: center; gap: 12px; margin-top: 9px; }
+.paper-chat-panel form small { flex: 1; color: var(--muted); font: 9px/1.5 var(--sans); }
+.paper-chat-panel form .button { flex: 0 0 auto; }
+@media(max-width:940px) { .reader-tools .paper-chat-action span { display: none; } }
+@media(max-width:740px) { .paper-chat-panel { width: 100%; } .paper-chat-panel > header { padding: 20px 19px 12px; } .paper-chat-intro,.paper-chat-prompts { padding-left: 19px; padding-right: 19px; } .paper-chat-messages { padding: 17px 19px; } .paper-chat-panel form { padding: 13px 19px 18px; } }

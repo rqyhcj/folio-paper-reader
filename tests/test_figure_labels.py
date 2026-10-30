@@ -2,7 +2,7 @@
 
 import pymupdf as fitz
 
-from backend.figures import _image_label, extract_figures
+from backend.figures import _complete_figure_regions, _image_label, extract_figures
 from backend.pdf_export import export_pdf
 
 
@@ -28,6 +28,20 @@ def test_numbered_conventional_and_outside_headings_are_protected():
 def test_ordinary_short_figure_labels_keep_existing_rule():
     assert _image_label(_paragraph("body", "x axis", kind="paragraph"), (80, 220, 480, 420))
     assert not _image_label(_paragraph("body", "x" * 301, kind="paragraph"), (80, 220, 480, 420))
+
+
+def test_short_axis_ticks_just_outside_the_vector_border_are_still_figure_labels():
+    rect = (133, 70, 502, 160)
+    assert _image_label(_paragraph("tick", "200", kind="paragraph", bbox=(119, 104, 128, 112)), rect)
+    assert _image_label(_paragraph("panel", "(a) Latency Breakdown", kind="paragraph", bbox=(121, 147, 245, 156)), rect)
+    assert not _image_label(_paragraph("caption", "Figure 6: Complete caption", kind="paragraph", bbox=(108, 164, 505, 188)), rect)
+
+
+def test_adjacent_panels_with_one_caption_become_one_complete_label_region():
+    caption = ((80, 180, 520, 205), "Figure 6: Two panels of one method.")
+    regions = _complete_figure_regions([(90, 70, 230, 145), (290, 72, 510, 142)], [caption], (0, 0, 600, 800))
+    assert regions == [(90, 70, 510, 177)]
+    assert _image_label(_paragraph("label", "Naïve", kind="paragraph", bbox=(150, 150, 190, 160)), regions[0])
 
 
 def test_extraction_marks_bold_labels_but_preserves_source_and_real_sections(tmp_path):

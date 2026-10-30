@@ -71,14 +71,14 @@ async function main() {
   sandbox.openAiLayout();
   assert.equal(requests.length,0,'opening the options must not call any API');
   assert.equal(get('ai-layout-dialog').open,true);
-  assert.equal(get('ai-mode-text').checked,true);
-  assert.equal(get('ai-mode-vision').checked,false);
+  assert.equal(get('ai-mode-text').checked,false);
+  assert.equal(get('ai-mode-vision').checked,true);
   assert.equal(get('ai-layout-page').value,'4');
   assert.equal(get('ai-layout-translate').checked,true);
-  assert.match(get('ai-layout-privacy').textContent,/第 4 页的提取文字/);
+  assert.match(get('ai-layout-privacy').textContent,/第 4 页的页面图像和文字/);
   assert.match(get('ai-layout-privacy').textContent,/计费/);
   await sandbox.startAiLayout({preventDefault(){}});
-  assert.deepEqual(requests[0],{url:'/papers/synthetic-layout/analyze',payload:{scope:'page',page:4,vision:false,translate_after:true}});
+  assert.deepEqual(requests[0],{url:'/papers/synthetic-layout/analyze',payload:{scope:'page',page:4,vision:true,translate_after:true}});
   assert.equal(get('ai-layout-dialog').open,false);
   assert.equal(get('ai-layout-banner').hidden,false);
   assert.equal(get('translate-button').disabled,true);
@@ -179,7 +179,7 @@ async function main() {
     text:'Broken extracted text frag-',translation_text:completeSource,translation:null,
     equation_source:{page:1,bbox:[60,80,500,400]},equation_image:'must-not-render-whole-paragraph.png',
     inline_math:[{id:'known',placeholder:'⟦FOLIO_MATH_1⟧',latex:'x_{t+1}=x_t+1',source:[]},
-      {id:'unknown',placeholder:'⟦FOLIO_MATH_2⟧',source:[{page:1,bbox:[110,120,154,133]}]}]};
+      {id:'unknown',placeholder:'⟦FOLIO_MATH_2⟧',source_text:'x / y',source:[{page:1,bbox:[110,120,154,133]}]}]};
   inlineState.paper.paragraphs=[inlineParagraph];
   inlineSandbox.renderParagraphs();
   const sourceBlock=inlineState.blocks.get('source-inline');
@@ -191,9 +191,9 @@ async function main() {
   assert.doesNotMatch(sourceText(),/FOLIO_MATH|Broken extracted/);
   assert.ok(mathCalls.includes('\\(x_{t+1}=x_t+1\\)'),'recovered original math goes through the existing renderer');
   const images=descendants(sourceNode).filter(item=>item.tag==='img');
-  assert.equal(images.length,1,'only the unknown formula receives a source crop');
-  assert.match(images[0].src,/\/inline-math\/source-inline\/unknown\/0\.png/);
-  assert.equal(images[0].width,44);assert.equal(images[0].height,13);
+  assert.equal(images.length,0,'unresolved formulas remain selectable text rather than screenshots');
+  assert.match(sourceText(),/x \/ y/);
+  assert.match(sourceText(),/核对原 PDF/);
   assert.equal(sourceBlock.querySelector('.paragraph-translation').hidden,true,'untranslated source remains fully readable');
   assert.equal(sourceNode.dataset.mathSearchHit,'true');
   writes=0;inlineSandbox.renderParagraphs();
@@ -201,17 +201,13 @@ async function main() {
   inlineParagraph.translation_text=completeSource.replace('completes the sentence','completes the repaired sentence');
   inlineSandbox.renderParagraphs();
   assert.match(sourceText(),/completes the repaired sentence/,'the protected source text is included in the paragraph render signature');
-  const activeImage=descendants(sourceNode).find(item=>item.tag==='img');
-  activeImage.listeners.error();
-  assert.equal(activeImage.hidden,true);
-  assert.match(sourceText(),/查看原式/,'a failed crop keeps a usable source link');
   for (const formulas of [[],[{id:'empty',placeholder:'⟦FOLIO_MATH_1⟧',source:[]}],
     [{id:'other',placeholder:'⟦FOLIO_MATH_2⟧',latex:'y',source:[]}]]) {
     const missing=element();
     inlineSandbox.translatedParagraphText(missing,'Before ⟦FOLIO_MATH_1⟧ after.',{inline_math:formulas});
     const visible=descendants(missing).map(item=>item.textContent || '').join('');
     assert.doesNotMatch(visible,/FOLIO_MATH/);
-    assert.match(visible,/原式.*缺失/,'missing formula metadata is visible instead of silently dropping source mathematics');
+    assert.match(visible,/待识别公式|原式.*缺失/,'missing formula metadata is visible instead of silently dropping source mathematics');
     assert.match(visible,/Before.*after\./);
   }
 

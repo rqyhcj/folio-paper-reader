@@ -316,6 +316,7 @@ def protected_source(*, recovered):
         "equation_source": {"page": 1, "bbox": [60, 80, 500, 400]},
         "inline_math": [{"id": "m1", "placeholder": "⟦FOLIO_MATH_1⟧",
                          "latex": r"\frac{x_t+1}{\sqrt{y}}" if recovered else None,
+                         "source_text": "x_t / sqrt(y)",
                          "source": [{"page": 1, "bbox": [110, 120, 154, 133]}]}],
     }
 
@@ -348,30 +349,28 @@ def test_exports_use_complete_source_inline_prose_even_before_translation(
     monkeypatch.setattr(api, "parse_jobs", {})
     monkeypatch.setattr(api, "figure_jobs", {})
     monkeypatch.setattr(previews, "inline_math_png", formula_crop)
-    monkeypatch.setattr(api, "equation_png", lambda *args: pytest.fail("Complete source prose must not be a screenshot"))
     response = asyncio.run(api.export(paper["id"], format=format))
     assert response.status_code == 200
     if format == "pdf":
         with fitz.open(stream=response.body, filetype="pdf") as document:
             text = " ".join(all_text(document).split())
             images = [image for page in document for image in page.get_image_info()]
-            assert len(images) == (0 if recovered else 1)
-            if images:
-                assert images[0]["width"] == 88 and images[0]["height"] == 26
+            assert len(images) == 0
             if recovered:
                 assert sum(len(page.get_drawings()) for page in document) > 5
                 assert not any(command in text for command in (r"\frac", r"\sqrt", "未能排版"))
             else:
-                assert "原式1" in text
+                assert "x_t / sqrt(y)" in text
     else:
         text = response.body.decode("utf-8")
         if recovered:
             assert r"\(\frac{x_t+1}{\sqrt{y}}\)" in text
         elif format == "html":
-            assert text.count("data:image/png;base64,") == 1
-            assert 'class="inline-math-source"' in text
+            assert text.count("data:image/png;base64,") == 0
+            assert 'class="inline-math-source-text"' in text
+            assert "x_t / sqrt(y)" in text
         else:
-            assert "〔原式1，见原 PDF〕" in text
+            assert "x_t / sqrt(y)" in text
         if format == "html":
             assert "&lt;b&gt;literal source&lt;/b&gt;" in text
             assert "<b>literal source</b>" not in text
@@ -379,7 +378,7 @@ def test_exports_use_complete_source_inline_prose_even_before_translation(
     assert "after the floating algorithm and completes the sentence." in text
     assert "尚未翻译" in text
     assert "FOLIO_MATH" not in text and "Broken extracted" not in text
-    assert crop_calls == ([] if recovered or format == "markdown" else [("merged-source", "m1", 0)])
+    assert crop_calls == []
     assert paper == before
 
 
@@ -389,6 +388,6 @@ def test_untranslated_source_inline_pdf_reports_missing_formula_crop_explicitly(
                    filetype="pdf") as document:
         text = " ".join(all_text(document).split())
         assert "The update uses" in text and "completes the sentence." in text
-        assert "行内公式原图未能导出" in text
+        assert "x_t / sqrt(y)" in text
         assert "FOLIO_MATH" not in text
         assert not any(page.get_images() for page in document)

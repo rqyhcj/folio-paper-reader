@@ -28,7 +28,10 @@ def _image_label(paragraph, rect):
     if paragraph.get("kind") in {"algorithm", "table"}:
         return False
     text = paragraph.get("text", "").strip()
-    if len(text) > 300 or CAPTION.match(text) or not _inside(paragraph, rect):
+    bbox = paragraph.get("bbox")
+    nearby = bool(bbox and len(bbox) == 4 and len(text) <= 120
+                  and _inside(paragraph, (rect[0] - 18, rect[1] - 8, rect[2] + 18, rect[3] + 8)))
+    if len(text) > 300 or CAPTION.match(text) or not (_inside(paragraph, rect) or nearby):
         return False
     if paragraph.get("kind") == "heading":
         return (len(text) <= 120 and not _SECTION_TITLE.fullmatch(text)
@@ -136,6 +139,58 @@ def _regions(snapshot, should_stop=None):
     return sorted(merged, key=lambda r: (r[1], r[0]))
 
 
+def _caption_candidate(rect, captions):
+    candidates = [(box, text) for box, text in captions
+                  if 0 <= box[1] - rect[3] < 160
+                  and box[2] > rect[0] and box[0] < rect[2]]
+    return min(candidates, key=lambda item: item[0][1] - rect[3]) if candidates else None
+
+
+def _complete_figure_regions(regions, captions, bounds):
+    """Join adjacent panels and include labels between artwork and caption.
+
+    PDF vector paths often stop at the plot border while panel letters, legends
+    and diagram labels live in separate text blocks just below it. Multiple
+    panels that point to the same caption are one reading figure, not several
+    tiny crops. Extending only toward a nearby caption avoids swallowing the
+    following body paragraph.
+    """
+    tagged = []
+    for rect in regions:
+        candidate = _caption_candidate(rect, captions)
+        tagged.append([tuple(rect), candidate])
+    changed = True
+    while changed:
+        changed = False
+        for left in range(len(tagged)):
+            rect, caption = tagged[left]
+            if not caption:
+                continue
+            for right in range(left + 1, len(tagged)):
+                other, other_caption = tagged[right]
+                if not other_caption or other_caption[1] != caption[1]:
+                    continue
+                vertical_overlap = max(0, min(rect[3], other[3]) - max(rect[1], other[1]))
+                min_height = min(rect[3] - rect[1], other[3] - other[1])
+                horizontal_gap = max(other[0] - rect[2], rect[0] - other[2], 0)
+                if vertical_overlap >= min_height * .25 and horizontal_gap <= 90:
+                    tagged[left] = [_union(rect, other), caption]
+                    del tagged[right]
+                    changed = True
+                    break
+            if changed:
+                break
+    result = []
+    for rect, caption in tagged:
+        if caption:
+            caption_box = caption[0]
+            gap = caption_box[1] - rect[3]
+            if 0 <= gap <= 80:
+                rect = (rect[0], rect[1], rect[2], max(rect[3], caption_box[1] - 3))
+        result.append(_intersect(rect, bounds))
+    return sorted(result, key=lambda r: (r[1], r[0]))
+
+
 def _anchors(rect, page_paras, caption):
     """Keep art beside its original text, before a following caption/body block."""
     # Labels already reproduced inside the image cannot be placement anchors.
@@ -193,6 +248,7 @@ def extract_figures(data: bytes, paragraphs: list[dict], destination: Path, pape
             rect = suggestion["bbox"]
             regions = [r for r in regions if _area(_intersect(r, rect)) < min(_area(r), _area(rect)) * .5]
             regions.append(tuple(rect))
+        regions = _complete_figure_regions(regions, captions, snapshot["bounds"])
         structures = [p for p in page_paras if p.get("kind") in {"algorithm", "table"} and p.get("bbox")]
         for rect in sorted(regions, key=lambda r: (r[1], r[0])):
             # A recovered algorithm/table has actual selectable text. Do not
@@ -203,8 +259,8 @@ def extract_figures(data: bytes, paragraphs: list[dict], destination: Path, pape
                 return
             if len(figures) >= 300 or total_bytes > 80 * 1024 * 1024:
                 return
-            candidates = [(box, text) for box, text in captions if abs(box[1] - rect[3]) < 160 and box[2] > rect[0] and box[0] < rect[2]]
-            caption = min(candidates, key=lambda item: abs(item[0][1] - rect[3]))[1] if candidates else ""
+            candidate = _caption_candidate(rect, captions)
+            caption = candidate[1] if candidate else ""
             chosen = next((r for r in suggestions if list(rect) == list(r["bbox"])), None)
             if chosen and chosen.get("caption"):
                 caption = chosen["caption"]

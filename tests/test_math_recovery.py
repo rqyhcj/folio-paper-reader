@@ -52,6 +52,12 @@ def test_superscript_and_subscript_on_one_variable_keep_their_sides():
     assert recover_expression(spans) == "x_{i}^{2}"
 
 
+def test_geometric_hat_is_attached_to_its_bold_variable_instead_of_becoming_an_image():
+    spans = [span("ˆ", 12, y=97.5, font="CMR10"), span("X", 10, font="CMMIB10")]
+    assert keep_span_characters(spans[0])
+    assert recover_expression(spans) == r"\hat{\mathbf{X}}"
+
+
 def test_blackboard_font_retains_expectation_symbol():
     spans = [span("E", 10, font="MSBM10"), span("(x)", 15.5)]
     assert recover_expression(spans) == r"\mathbb{E}(x)"
@@ -212,15 +218,18 @@ def test_parenthesized_chart_label_alone_does_not_become_a_formula():
     assert result[0]["kind"] == "paragraph"
 
 
-def test_ambiguous_inline_radical_uses_original_prose_crop_and_keeps_translation_eligibility():
+def test_ambiguous_inline_radical_keeps_selectable_prose_and_isolates_formula_crop():
     spans = [span("A scaling factor ", 10, font="Helvetica"), span("q", 95, font="CMEX10"),
              span("1+x", 101)]
     paragraph = {"text": "A scaling factor q1+x", "kind": "paragraph", "page": 6, "bbox": [10, 80, 160, 112]}
     result = recover_paragraph(paragraph, [SimpleNamespace(spans=spans)])
     assert result["kind"] == "paragraph"
     assert result["ambiguous_inline_math"] is True
-    assert result["math_status"] == "source-image"
-    assert result["equation_source"] == {"page": 6, "bbox": [10, 80, 160, 112]}
+    assert result["math_status"] == "source-inline"
+    assert "equation_source" not in result and "equation_image" not in result
+    assert result["translation_text"] == "A scaling factor ⟦FOLIO_MATH_1⟧"
+    assert result["inline_math"][0]["source_text"] == "q1+x"
+    assert result["inline_math"][0]["source"][0]["page"] == 6
 
 
 def test_plain_fraction_numerator_is_math_context_not_a_prose_separator():

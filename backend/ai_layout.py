@@ -76,6 +76,11 @@ include complete:true and ONE corresponding transcription:
   every data cell, units and notes; no invented or omitted values;
 * paragraph: inline_latex, an array of {id:existing FOLIO_MATH_N,latex:string},
   covering every given inline-math slot exactly once, in its original order.
+Prioritize every source-image/source-inline formula. Complexity is not a reason
+to keep a screenshot: combine adjacent fragments belonging to one equation and
+transcribe every visible symbol, accent, script, fraction, radical, matrix,
+brace and equation number. Use the unchanged source only when the page itself
+is genuinely illegible or cut off.
 Use \\( ... \\) around formulas inside algorithm lines and table cells. Do not
 emit HTML, executable TeX, markdown tables, bare TeX commands outside math, or
 replacement prose. If unclear or cut off, retain the unchanged original group
@@ -263,7 +268,7 @@ def _overlap(a, b):
     return width * height / min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
 
 
-def _normalize_groups(raw, blocks, page_number, vision):
+def _normalize_groups_strict(raw, blocks, page_number, vision):
     if not isinstance(raw, list) or not 1 <= len(raw) <= len(blocks):
         _fail()
     expected = [p["id"] for p in blocks]
@@ -384,7 +389,66 @@ def _normalize_groups(raw, blocks, page_number, vision):
     return result
 
 
-def _normalize_regions(raw, page_number, width, height, vision, groups):
+def _unchanged_group(paragraph):
+    result = _source_fields(paragraph)
+    result.update(ids=[paragraph["id"]], changed=False,
+                  kind=paragraph.get("kind", "paragraph"))
+    return result
+
+
+def _normalize_groups(raw, blocks, page_number, vision, *, tolerant=False, warnings=None):
+    """Validate model groups, optionally accepting sound groups independently.
+
+    The local source remains the authority. In the interactive app a malformed
+    or omitted model group no longer invalidates an otherwise useful page: that
+    source block is retained unchanged and the warning is surfaced to the user.
+    Strict mode remains available for callers and tests that need an atomic
+    contract.
+    """
+    if not tolerant:
+        return _normalize_groups_strict(raw, blocks, page_number, vision)
+    notes = warnings if warnings is not None else []
+    if not isinstance(raw, list):
+        notes.append("模型未返回可用的段落分组，本页保留原排版。")
+        return [_unchanged_group(item) for item in blocks]
+    positions = {item["id"]: index for index, item in enumerate(blocks)}
+    accepted, used = {}, set()
+    for item in raw[:MAX_BLOCKS]:
+        ids = item.get("ids") if isinstance(item, dict) else None
+        valid_ids = (isinstance(ids, list) and ids and len(ids) == len(set(ids))
+                     and all(isinstance(value, str) and value in positions for value in ids))
+        if not valid_ids:
+            notes.append("模型返回了无法对应原文的内容块，已局部保留原文。")
+            continue
+        indexes = [positions[value] for value in ids]
+        if indexes != list(range(indexes[0], indexes[0] + len(indexes))) or any(value in used for value in ids):
+            notes.append("模型改变了内容顺序或重复使用原文块，相关内容未应用。")
+            continue
+        members = [blocks[index] for index in indexes]
+        try:
+            normalized = _normalize_groups_strict([item], members, page_number, vision)[0]
+        except LayoutAnalysisError:
+            notes.append("有一处公式或结构未通过完整性检查，已保留原文等待再次识别。")
+            continue
+        accepted[indexes[0]] = normalized
+        used.update(ids)
+    result = []
+    index = 0
+    while index < len(blocks):
+        if index in accepted:
+            group = accepted[index]
+            result.append(group)
+            index += len(group["ids"])
+        else:
+            result.append(_unchanged_group(blocks[index]))
+            index += 1
+    # Keep the UI readable when a weak model repeats the same mistake many times.
+    if warnings is not None:
+        warnings[:] = list(dict.fromkeys(warnings))
+    return result
+
+
+def _normalize_regions_strict(raw, page_number, width, height, vision, groups):
     if not isinstance(raw, list) or len(raw) > MAX_REGIONS or (raw and not vision):
         _fail()
     result = []
@@ -411,6 +475,33 @@ def _normalize_regions(raw, page_number, width, height, vision, groups):
             caption = _structured_text(caption, 2000)
         result.append({"kind": item["kind"], "page": page_number, "bbox": rect,
                        "caption": caption, "ai_reconstructed": True})
+    return result
+
+
+def _normalize_regions(raw, page_number, width, height, vision, groups, *, tolerant=False, warnings=None):
+    if not tolerant:
+        return _normalize_regions_strict(raw, page_number, width, height, vision, groups)
+    notes = warnings if warnings is not None else []
+    if not isinstance(raw, list):
+        notes.append("模型未返回可用的图表范围，本页沿用本地插图。")
+        return []
+    if raw and not vision:
+        notes.append("文本模式不能读取页面图像，模型返回的图表范围已忽略。")
+        return []
+    result = []
+    for item in raw[:MAX_REGIONS]:
+        try:
+            values = _normalize_regions_strict([item], page_number, width, height, vision, groups)
+        except LayoutAnalysisError:
+            notes.append("有一处图表范围不完整，已跳过该范围。")
+            continue
+        for value in values:
+            if not any(_overlap(value["bbox"], previous["bbox"]) > .9 for previous in result):
+                result.append(value)
+    if len(raw) > MAX_REGIONS:
+        notes.append("模型返回的图表范围过多，仅处理了前面的有效范围。")
+    if warnings is not None:
+        warnings[:] = list(dict.fromkeys(warnings))
     return result
 
 
@@ -474,7 +565,8 @@ async def _request(body, endpoint, api_key, client, vision):
 
 
 async def analyze_page(paper: dict, page_number: int, source: bytes, settings: dict, *,
-                       vision: bool = False, client: httpx.AsyncClient | None = None) -> dict:
+                       vision: bool = False, tolerant: bool = False,
+                       client: httpx.AsyncClient | None = None) -> dict:
     """Analyze one page without modifying its paper or contacting other hosts.
 
     Returned ``groups`` are flat, locally normalized source paragraphs plus
@@ -482,7 +574,7 @@ async def analyze_page(paper: dict, page_number: int, source: bytes, settings: d
     The source fingerprint excludes translations, allowing the caller to merge
     against the latest saved translations while rejecting stale source layouts.
     """
-    if not isinstance(vision, bool):
+    if not isinstance(vision, bool) or not isinstance(tolerant, bool):
         _fail()
     blocks = _page_blocks(paper, page_number)
     endpoint, model, api_key = _configuration(settings)
@@ -504,11 +596,15 @@ async def analyze_page(paper: dict, page_number: int, source: bytes, settings: d
     else:
         response = await _request(body, endpoint, api_key, client, vision)
     parsed = _decode(response)
-    groups = await asyncio.to_thread(_normalize_groups, parsed.get("groups"), blocks, page_number, vision)
-    regions = _normalize_regions(parsed.get("regions", []), page_number, width, height, vision, groups)
+    warnings = []
+    groups = await asyncio.to_thread(_normalize_groups, parsed.get("groups"), blocks, page_number, vision,
+                                     tolerant=tolerant, warnings=warnings)
+    regions = _normalize_regions(parsed.get("regions", []), page_number, width, height, vision, groups,
+                                 tolerant=tolerant, warnings=warnings)
     return {"paper_id": paper.get("id"), "page": page_number, "vision": vision, "model": model,
             "page_size": [width, height], "source_ids": [p["id"] for p in blocks],
-            "source_fingerprint": _fingerprint(paper, blocks), "groups": groups, "regions": regions}
+            "source_fingerprint": _fingerprint(paper, blocks), "groups": groups, "regions": regions,
+            "warnings": warnings}
 
 
 def apply_page_analysis(paper: dict, proposal: dict) -> dict:

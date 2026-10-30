@@ -116,6 +116,13 @@ async function main() {
   assert.equal(render(delayed), true);
   assert.equal(formulas(delayed)[0], firstFormula, 'unchanged formula DOM is retained');
 
+  const chatPanel = new TestNode('aside');
+  body.append(chatPanel);
+  const chatAnswer = paragraph('结论为 \\(x_t\\)，并且 \\[Q(X)=s_X Q_X\\]。', chatPanel);
+  assert.equal(render(chatAnswer), true, 'paper Q&A outside the reader renders immediately');
+  assert.equal(formulas(chatAnswer).length, 2);
+  assert.ok(!observer.targets.has(chatAnswer), 'chat math never waits on the article viewport observer');
+
   const plain = paragraph('No formula in prose, or an unmatched $ delimiter.');
   assert.equal(render(plain), true);
   assert.ok(!observer.targets.has(plain), 'only complete mathematical expressions are observed');

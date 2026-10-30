@@ -16,8 +16,9 @@ import unicodedata
 _MATH_FONT = re.compile(r"(?:CMMI|CMMIB|CMSY|CMEX|MSAM|MSBM|Math|Symbol)", re.I)
 _CM_FONT = re.compile(r"(?:^|\+)(?:CM(?:R|BX|TI|MI|MIB|SY|SS)|MSBM)\d", re.I)
 _NUMBER = re.compile(r"^\s*[（(](\d+[a-z]?)[）)]\s*$", re.I)
-_OPERATORS = {"arg", "min", "max", "argmin", "argmax", "sin", "cos", "tan", "log", "ln",
-              "exp", "lim", "sup", "inf", "det", "diag", "rank", "tr", "Tr", "Var", "Cov", "Pr", "SVD", "SVDk", "ReLU"}
+_OPERATORS = {"arg", "min", "max", "argmin", "argmax", "round", "floor", "ceil", "clip", "clamp",
+              "sin", "cos", "tan", "log", "ln", "exp", "lim", "sup", "inf", "det", "diag", "rank",
+              "tr", "Tr", "Var", "Cov", "Pr", "SVD", "SVDk", "ReLU"}
 _GREEK_NAMES = {
     "α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta", "ε": "epsilon", "ϵ": "varepsilon",
     "ζ": "zeta", "η": "eta", "θ": "theta", "ϑ": "vartheta", "ι": "iota", "κ": "kappa",
@@ -43,6 +44,7 @@ _SYMBOLS = {
     "⟨": r"\langle ", "⟩": r"\rangle ", "{": r"\{", "}": r"\}", "%": r"\%", "_": r"\_",
     "√": r"\sqrt ", "≮": r"\nless ", "≯": r"\ngtr ", "†": r"\dagger ", "∗": r"\ast ",
 }
+_ACCENTS = {"ˆ": r"\hat", "˜": r"\tilde"}
 
 
 @dataclass(frozen=True)
@@ -72,7 +74,7 @@ def keep_span_characters(span: dict) -> bool:
         return True
     words = re.findall(r"[A-Za-z]+", text)
     allowed = all(len(word) == 1 or word in _OPERATORS for word in words)
-    return allowed and all(char.isspace() or char in _GREEK_NAMES or char in _SYMBOLS
+    return allowed and all(char.isspace() or char in _GREEK_NAMES or char in _SYMBOLS or char in _ACCENTS
                            or bool(re.fullmatch(r"[A-Za-z0-9=+\-*/.,:;!|()\[\]<>?]", char)) for char in text)
 
 
@@ -93,6 +95,8 @@ def _tex(glyph: _Glyph) -> str | None:
     char = glyph.char
     if glyph.latex is not None:
         return glyph.latex
+    if char in _ACCENTS:
+        return None  # Accents are valid only after geometric attachment to a base.
     if char == "√":
         return None  # A radical requires its proven overbar and radicand.
     named = {"parenleftbig": "(", "parenrightbig": ")", "parenleftBig": "(", "parenrightBig": ")",
@@ -328,8 +332,11 @@ def annotate_page_math(page, lines: list) -> None:
             header = raw[:65536].split(b"currentfile eexec", 1)[0].decode("latin-1")
             encoding = {int(code): glyph for code, glyph in re.findall(
                 r"\bdup\s+(\d+)\s+/([A-Za-z][A-Za-z0-9]*)\s+put\b", header)}
-            # Only the verified built-in ASCII positions are used. Explicit
-            # Unicode mappings take precedence and cannot be reinterpreted.
+            # Only verified font-program names are used. A meaningful Unicode
+            # mapping takes precedence; C0 control-character mappings do not —
+            # TeX PDFs frequently map CMEX delimiters to their raw font codes
+            # (for example 0x12) even though the PFA identifies a large left
+            # parenthesis unambiguously.
             unicode_codes = set()
             unicode_values = set()
             obj = page.parent.xref_object(font[0])
@@ -343,19 +350,24 @@ def annotate_page_math(page, lines: list) -> None:
                 cmap = page.parent.xref_stream(int(ref.group(1))).decode("latin-1")
                 for section in re.findall(r"beginbfchar(.*?)endbfchar", cmap, re.S):
                     for code, value in re.findall(r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>", section):
-                        unicode_codes.add(int(code, 16))
-                        if len(value) <= 4:
-                            unicode_values.add(int(value, 16))
+                        mapped = int(value, 16) if len(value) <= 4 else 0
+                        if mapped >= 32 and mapped != 127:
+                            unicode_codes.add(int(code, 16))
+                            unicode_values.add(mapped)
                 for section in re.findall(r"beginbfrange(.*?)endbfrange", cmap, re.S):
                     for low, high, values in re.findall(
                             r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]+>|\[[^\]]*\])", section):
                         start, end = int(low, 16), min(int(high, 16), 255)
-                        unicode_codes.update(range(start, end + 1))
                         if values.startswith("["):
-                            unicode_values.update(int(value, 16) for value in re.findall(r"<([0-9A-Fa-f]{1,4})>", values))
+                            mapped = [int(value, 16) for value in re.findall(r"<([0-9A-Fa-f]{1,4})>", values)]
+                            unicode_codes.update(code for code, value in zip(range(start, end + 1), mapped)
+                                                 if value >= 32 and value != 127)
+                            unicode_values.update(value for value in mapped if value >= 32 and value != 127)
                         elif len(values) <= 6:
                             first = int(values[1:-1], 16)
-                            unicode_values.update(range(first, first + max(0, end - start + 1)))
+                            if first >= 32 and first != 127:
+                                unicode_codes.update(range(start, end + 1))
+                                unicode_values.update(range(first, first + max(0, end - start + 1)))
             encodings[name] = {code: glyph for code, glyph in encoding.items()
                                if code < 128 and code not in unicode_codes and code not in unicode_values}
     except Exception:
@@ -417,8 +429,9 @@ def _structured_expression(glyphs: list[_Glyph], rules: list[tuple]) -> str | No
     for _ in range(min(64, len(items) + len(active_rules))):
         changed = False
         for accent in list(items):
-            command = (r"\widehat" if accent.name in {"hatwide", "hatwider", "hatwidest"} else
-                       r"\widetilde" if accent.name in {"tildewide", "tildewider", "tildewidest"} else None)
+            command = (_ACCENTS.get(accent.char) or
+                       (r"\widehat" if accent.name in {"hatwide", "hatwider", "hatwidest"} else
+                        r"\widetilde" if accent.name in {"tildewide", "tildewider", "tildewidest"} else None))
             if command is None:
                 continue
             body = [item for item in items if item != accent and item.size >= accent.size * .88
@@ -697,6 +710,7 @@ def _protect_inline_translation(paragraph: dict, lines: list) -> None:
     if not slots:
         return
     for slot, spans in zip(slots, slot_spans):
+        slot["source_text"] = _span_text(spans).strip()
         latex = recover_expression(spans)
         if latex:
             slot["latex"] = latex
@@ -737,19 +751,14 @@ def recover_paragraph(paragraph: dict, lines: list) -> dict:
     if paragraph["kind"] == "heading":
         return paragraph
     if _ambiguous_inline_math(lines):
-        # Large inline roots / delimiters can decode as unrelated ASCII
-        # letters (e.g. CMEX's "q" is a radical). Preserve the entire prose
-        # region rather than presenting a convincing but false inline formula.
-        # It remains a prose paragraph so its surrounding explanation can be
-        # translated; the original display uses the same safe image endpoint
-        # as complex standalone equations.
-        box = paragraph["bbox"]
+        # Keep prose selectable and isolate only the uncertain mathematical
+        # runs. Previously the entire paragraph became a screenshot, which was
+        # visually heavy and made captions look like duplicate figures. Each
+        # unresolved slot still retains its exact local source rectangle and
+        # can later be replaced by visual LaTeX recognition.
         paragraph["source_text"] = paragraph["text"]
-        paragraph["math_status"] = "source-image"
+        paragraph["math_status"] = "source-inline"
         paragraph["ambiguous_inline_math"] = True
-        paragraph["equation_source"] = {"page": paragraph["page"], "bbox": box}
-        paragraph["equation_image"] = {"width": max(1, round(box[2] - box[0])),
-                                       "height": max(1, round(box[3] - box[1])), "latex_available": False}
         _protect_inline_translation(paragraph, lines)
         return paragraph
     changed = False

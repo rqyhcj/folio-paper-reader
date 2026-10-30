@@ -227,6 +227,16 @@ export function renderMath(element) {
     return true;
   }
   if (waitForClosedDetails(element)) return false;
+  // Dialogs and the paper-Q&A drawer live outside the scrollable article.
+  // A target outside an IntersectionObserver root never becomes intersecting,
+  // so render those compact UI surfaces immediately with the same safe KaTeX
+  // configuration used for paper paragraphs.
+  const reader = document.getElementById('reader-scroll');
+  let insideReader = false;
+  for (let parent = element; parent; parent = parent.parentNode) {
+    if (parent === reader) { insideReader = true; break; }
+  }
+  if (reader && element.isConnected && !insideReader) return renderMathNow(element);
   const observer = getMathObserver();
   if (!observer) return renderMathNow(element);
   observed.add(element);

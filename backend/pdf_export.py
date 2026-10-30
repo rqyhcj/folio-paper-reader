@@ -13,7 +13,7 @@ import re
 
 import fitz
 from .pdf_runtime import synchronized_pdf
-from .inline_math_export import TOKEN, slots, text_with_math
+from .inline_math_export import text_with_math
 from .math_typeset import split_math, render_formula
 from .structured_content import rows_for
 
@@ -347,9 +347,7 @@ class _Layout:
 
 
 @synchronized_pdf
-def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None,
-               equation_paths: dict[str, Path] | None = None,
-               inline_paths: dict[tuple[str, str, int], Path] | None = None) -> bytes:
+def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None) -> bytes:
     """Return a complete A4 PDF; every English paragraph precedes its Chinese.
 
     Only explicitly supplied local image paths are read. A paper's URLs and text
@@ -358,8 +356,6 @@ def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None,
     treated as successfully exported. The caller retains ownership of inputs.
     """
     figure_paths = figure_paths or {}
-    equation_paths = equation_paths or {}
-    inline_paths = inline_paths or {}
     title = _clean(paper.get("title")) or "未命名论文"
     with fitz.open() as document, ExitStack() as math_sources:
         layout = _Layout(document, math_sources)
@@ -383,26 +379,6 @@ def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None,
         def translation_text(paragraph):
             value = _clean(paragraph.get("translation")) or "[尚未翻译]"
             return text_with_math(paragraph, value)
-
-        def insert_inline_math(paragraph):
-            referenced = paragraph.get("translation") or ""
-            if paragraph.get("math_status") == "source-inline":
-                referenced += paragraph.get("translation_text") or ""
-            for placeholder, item in slots(paragraph).items():
-                if placeholder not in referenced or item.get("latex"):
-                    continue
-                number = TOKEN.fullmatch(placeholder).group(1)
-                layout.text(f"〔原式{number}〕", size=9, leading=14, color=MUTED, after=4)
-                for index, _ in enumerate(item.get("source") or []):
-                    path = inline_paths.get((paragraph.get("id"), item["id"], index))
-                    try:
-                        if path is not None and Path(path).is_file():
-                            layout.math_piece(Path(path))
-                            continue
-                    except (ValueError, RuntimeError):
-                        pass
-                    layout.text("[行内公式原图未能导出，请查看原始 PDF]", size=9, leading=15, color=MUTED, after=8)
-                layout.y += 8
 
         def insert_figures(items):
             for figure in items:
@@ -436,18 +412,15 @@ def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None,
                 continue
             if paragraph.get("kind") == "equation" or paragraph.get("math_status") == "source-image":
                 if paragraph.get("math_status") == "source-image":
-                    path = equation_paths.get(paragraph.get("id"))
-                    if path is not None and Path(path).is_file():
-                        caption = "原文片段（含复杂公式）" if paragraph.get("ambiguous_inline_math") else "原文公式"
-                        layout.figure({"page": paragraph.get("page"), "caption": caption}, Path(path))
-                    else:
-                        layout.text("[公式原图未能导出，请查看原始 PDF]", size=9, leading=15, color=MUTED, after=14)
+                    layout.text(_clean(paragraph.get("text")) or "[公式文字待识别]",
+                                font=layout.english, after=8)
+                    layout.text("[该公式尚未恢复为 LaTeX，可在原始 PDF 中核对]",
+                                size=8.5, leading=14, color=MUTED, after=14)
                 else:
                     layout.text(_clean(paragraph.get("text")), font=layout.english, after=19)
                 if paragraph.get("kind") != "equation":
                     layout.text(translation_text(paragraph),
                                 size=10.5, leading=18.5, color=TRANSLATION, after=19)
-                    insert_inline_math(paragraph)
                 insert_figures(after_paragraph.get(str(paragraph.get("id") or ""), []))
                 continue
             heading = paragraph.get("kind") == "heading"
@@ -477,7 +450,6 @@ def export_pdf(paper: dict, figure_paths: dict[str, Path] | None = None,
                         leading=english_leading, after=6)
             layout.text(translated, size=chinese_size, leading=chinese_leading,
                         color=TRANSLATION, after=19 if not heading else 14)
-            insert_inline_math(paragraph)
             insert_figures(after_paragraph.get(str(paragraph.get("id") or ""), []))
         # Preserve figures with missing/stale anchors instead of dropping them.
         insert_figures(figures)

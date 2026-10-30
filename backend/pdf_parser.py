@@ -22,8 +22,13 @@ from .reading_structure import extract_structures, stitch_sentences
 
 MAX_PAGES = 500
 MAX_TEXT_CHARS = 3_000_000
-MAX_PARAGRAPH_CHARS = 4500
-PARSE_VERSION = 8
+# Translation units should read like real paragraphs, not whole PDF columns.
+# This is a soft ceiling: a single unusually long sentence is never cut in the
+# middle merely to satisfy a character count.
+MAX_PARAGRAPH_CHARS = 1400
+TARGET_PARAGRAPH_CHARS = 850
+MAX_PARAGRAPH_SENTENCES = 4
+PARSE_VERSION = 11
 
 
 class PDFExtractionError(ValueError):
@@ -461,8 +466,9 @@ def _mark_inline_regions(lines: list[_Line], body_size: float) -> list[_Line]:
 
 
 _EQUATION_NUMBER = re.compile(r"[（(]\s*(\d+[a-z]?)\s*[）)]\s*[,.;:]?$", re.I)
-_MATH_WORDS = {"arg", "min", "max", "argmin", "argmax", "sin", "cos", "tan", "log", "ln",
-               "exp", "lim", "sup", "inf", "det", "diag", "rank", "tr", "Tr", "Var", "Cov", "Pr", "SVD", "ReLU"}
+_MATH_WORDS = {"arg", "min", "max", "argmin", "argmax", "round", "floor", "ceil", "clip", "clamp",
+               "sin", "cos", "tan", "log", "ln", "exp", "lim", "sup", "inf", "det", "diag", "rank",
+               "tr", "Tr", "Var", "Cov", "Pr", "SVD", "ReLU"}
 _RELATION = re.compile(r"[=∑∫∏≈≃≅≠≤≥∈∉∼∝←→↔⇒⇔]")
 
 
@@ -846,31 +852,82 @@ def _assemble_page(lines: list[_Line], body_size: float, structures: list[dict] 
     return paragraphs
 
 
-def _chunk_paragraph(paragraph: dict) -> list[dict]:
-    if paragraph.get("kind") in {"algorithm", "table", "equation"} or paragraph.get("inline_math"):
-        return [paragraph]
-    remaining = paragraph["text"]
-    result = []
-    while len(remaining) > MAX_PARAGRAPH_CHARS:
-        window = remaining[:MAX_PARAGRAPH_CHARS + 1]
-        candidates = [match.end() for match in re.finditer(r"[.!?。！？]\s+", window)
-                      if match.end() > MAX_PARAGRAPH_CHARS // 2]
-        if not candidates:
-            # This is a soft target, not a reason to break a sentence or word.
-            # A longer complete sentence remains one translation unit.
-            next_end = re.search(r"[.!?。！？](?:\s+|$)", remaining[MAX_PARAGRAPH_CHARS:])
-            if next_end:
-                cut = MAX_PARAGRAPH_CHARS + next_end.end()
-            else:
-                break
+def _sentence_units(text: str) -> list[str]:
+    text = text.strip()
+    # A period followed by whitespace is a boundary except for common academic
+    # abbreviations. The negative look-behind list is deliberately small and
+    # predictable; sentence stitching has already repaired physical PDF rows.
+    ends, start = [], 0
+    abbreviation = re.compile(r"(?:\be\.g|\bi\.e|\bet al|\bFig|\bEq|\bSec|\bDr|\bProf|\bvs)\.$", re.I)
+    for match in re.finditer(r"[.!?。！？][\"'”’）)\]}]*(?:\s+|$)", text):
+        candidate = text[start:match.end()].strip()
+        if candidate and not abbreviation.search(candidate):
+            ends.append(match.end())
+            start = match.end()
+    sentences = []
+    previous = 0
+    for end in ends:
+        if value := text[previous:end].strip():
+            sentences.append(value)
+        previous = end
+    if value := text[previous:].strip():
+        sentences.append(value)
+    return sentences
+
+
+def _chunk_ranges(sentences: list[str]) -> list[tuple[int, int]]:
+    if len(sentences) <= 1:
+        return [(0, len(sentences))]
+
+    result, current, start = [], [], 0
+    for sentence in sentences:
+        joined = " ".join([*current, sentence])
+        # Prefer 2–4 complete sentences. A chunk may exceed the soft target to
+        # keep the sentence intact, but a new sentence starts a fresh unit once
+        # the current unit is already comfortable for bilingual reading.
+        should_flush = bool(current) and (
+            len(current) >= MAX_PARAGRAPH_SENTENCES
+            or (len(" ".join(current)) >= TARGET_PARAGRAPH_CHARS and len(joined) > MAX_PARAGRAPH_CHARS)
+            or len(joined) > MAX_PARAGRAPH_CHARS
+        )
+        if should_flush:
+            result.append((start, start + len(current)))
+            start += len(current)
+            current = [sentence]
         else:
-            cut = candidates[-1]
-        if cut <= 0:
-            cut = MAX_PARAGRAPH_CHARS
-        result.append({**paragraph, "text": remaining[:cut].strip()})
-        remaining = remaining[cut:].strip()
-    if remaining:
-        result.append({**paragraph, "text": remaining})
+            current.append(sentence)
+    if current:
+        result.append((start, start + len(current)))
+    return result
+
+
+def _chunk_paragraph(paragraph: dict) -> list[dict]:
+    if paragraph.get("kind") in {"algorithm", "table", "equation"}:
+        return [paragraph]
+    sentences = _sentence_units(paragraph["text"])
+    ranges = _chunk_ranges(sentences)
+    if len(ranges) <= 1:
+        return [paragraph]
+    aligned = {}
+    for key in ("source_text", "translation_text"):
+        if paragraph.get(key):
+            units = _sentence_units(paragraph[key])
+            if len(units) != len(sentences):
+                # Formula placeholders and prose must remain aligned. If an
+                # unusual PDF changes sentence punctuation inside a protected
+                # formula, keep this one paragraph intact for the visual pass.
+                return [paragraph]
+            aligned[key] = units
+    result = []
+    for first, last in ranges:
+        item = {**paragraph, "text": " ".join(sentences[first:last])}
+        for key, units in aligned.items():
+            item[key] = " ".join(units[first:last])
+        if paragraph.get("inline_math"):
+            protected = item.get("translation_text", "")
+            item["inline_math"] = [slot for slot in paragraph["inline_math"]
+                                   if slot.get("placeholder") in protected]
+        result.append(item)
     return result
 
 

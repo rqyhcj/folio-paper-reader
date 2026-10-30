@@ -68,13 +68,13 @@ def test_wrapped_inline_fraction_and_when_clause_form_one_protected_paragraph():
     assert "new paragraph" not in paragraph["translation_text"]
 
 
-def test_inline_radical_crop_uses_radicand_top_without_changing_full_source_region():
+def test_inline_radical_crop_uses_radicand_top_without_a_whole_paragraph_image():
     spans = [span("A scale ", [5, 80, 30, 90]),
              span("p", [31, 72, 40, 86], font="CMEX10"),
              span("1-a", [40, 80, 70, 90], font="CMMI10")]
     paragraph = {"text": "A scale p1-a", "kind": "paragraph", "page": 3, "bbox": [5, 72, 70, 90]}
     result = recover_paragraph(paragraph, [SimpleNamespace(spans=spans)])
-    assert result["equation_source"]["bbox"] == [5, 72, 70, 90]
+    assert "equation_source" not in result and result["math_status"] == "source-inline"
     assert result["inline_math"][0]["source"][0]["bbox"] == [31, 80, 70, 90]
     assert result["translation_text"] == "A scale ⟦FOLIO_MATH_1⟧"
 

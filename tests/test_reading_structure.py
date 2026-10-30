@@ -25,6 +25,19 @@ def test_word_and_sentence_continue_across_pages_without_fabricated_coordinates(
     assert paragraph["source_regions"][1]["bbox"][1] < 110
 
 
+def test_sentence_continues_across_a_bottom_footnote_and_page_break():
+    def draw(document):
+        first = document.new_page(width=600, height=800)
+        first.insert_text((70, 700), "The fused kernel is designed to cut", fontsize=11)
+        first.insert_text((70, 745), "* Supporting implementation note.", fontsize=7)
+        second = document.new_page(width=600, height=800)
+        second.insert_text((70, 90), "off redundant memory access. The result remains efficient.", fontsize=11)
+    result = parse(draw)
+    paragraph = next(p for p in result["paragraphs"] if "fused kernel" in p["text"])
+    assert "cut off redundant memory access" in paragraph["text"]
+    assert any("Supporting implementation note" in p["text"] for p in result["paragraphs"])
+
+
 def test_word_continues_from_bottom_left_to_top_right_column():
     def draw(document):
         page = document.new_page(width=600, height=800)
@@ -195,6 +208,28 @@ def test_chunking_uses_complete_sentence_boundaries():
     assert len(chunks) > 1
     assert all(p["text"].endswith(".") for p in chunks)
     assert " ".join(p["text"] for p in chunks) == text
+
+
+def test_chunking_prefers_two_to_four_complete_sentences_for_bilingual_reading():
+    sentences = [f"Sentence {index} explains one complete idea." for index in range(1, 10)]
+    chunks = _chunk_paragraph({"kind": "paragraph", "text": " ".join(sentences)})
+    assert [chunk["text"].count(".") for chunk in chunks] == [4, 4, 1]
+    assert " ".join(chunk["text"] for chunk in chunks) == " ".join(sentences)
+
+
+def test_chunking_keeps_protected_inline_formula_slots_with_their_complete_sentences():
+    sentences = [f"Sentence {index} explains one complete idea." for index in range(1, 7)]
+    protected = list(sentences)
+    protected[1] = "Sentence 2 uses ⟦FOLIO_MATH_1⟧ in one complete idea."
+    protected[4] = "Sentence 5 uses ⟦FOLIO_MATH_2⟧ in one complete idea."
+    paragraph = {"kind": "paragraph", "text": " ".join(sentences),
+                 "source_text": " ".join(sentences), "translation_text": " ".join(protected),
+                 "inline_math": [{"placeholder": "⟦FOLIO_MATH_1⟧"}, {"placeholder": "⟦FOLIO_MATH_2⟧"}]}
+    chunks = _chunk_paragraph(paragraph)
+    assert [chunk["text"].count(".") for chunk in chunks] == [4, 2]
+    assert [len(chunk["inline_math"]) for chunk in chunks] == [1, 1]
+    assert chunks[0]["inline_math"][0]["placeholder"] == "⟦FOLIO_MATH_1⟧"
+    assert chunks[1]["inline_math"][0]["placeholder"] == "⟦FOLIO_MATH_2⟧"
 
 
 def test_algorithm_keeps_statements_indentation_and_wrapped_words_as_one_block():

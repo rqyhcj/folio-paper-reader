@@ -1,7 +1,6 @@
 """Safe local substitutions for protected mathematical translation slots."""
 from __future__ import annotations
 
-import base64
 import html
 from pathlib import Path
 import re
@@ -30,14 +29,17 @@ def text_with_math(paragraph: dict, value: str, *, markdown=False) -> str:
         latex = item.get("latex")
         if isinstance(latex, str) and latex.strip():
             return r"\(" + latex.strip() + r"\)"
+        source = item.get("source_text")
+        if isinstance(source, str) and source.strip():
+            return source.strip()
         suffix = "，见原 PDF" if markdown else ""
-        return f"〔原式{match.group(1)}{suffix}〕"
+        return f"〔待识别公式{match.group(1)}{suffix}〕"
 
     return TOKEN.sub(replace, value)
 
 
-def html_with_math(paragraph: dict, value: str, paths: dict[tuple[str, str, int], Path]) -> str:
-    """Escape all prose and embed only explicitly supplied local crop paths."""
+def html_with_math(paragraph: dict, value: str, _paths: dict[tuple[str, str, int], Path] | None = None) -> str:
+    """Escape all prose and keep unresolved formula source as selectable text."""
     mapping = slots(paragraph)
     result, start = [], 0
     for match in TOKEN.finditer(value):
@@ -47,17 +49,9 @@ def html_with_math(paragraph: dict, value: str, paths: dict[tuple[str, str, int]
         if isinstance(latex, str) and latex.strip():
             result.append(html.escape(r"\(" + latex.strip() + r"\)"))
         elif item:
-            pieces = []
-            for index, region in enumerate(item.get("source") or []):
-                path = paths.get((paragraph.get("id"), item["id"], index))
-                if path is None or not Path(path).is_file():
-                    pieces.append("〔原式图片缺失，请查看原 PDF〕")
-                    continue
-                encoded = base64.b64encode(Path(path).read_bytes()).decode("ascii")
-                box = region.get("bbox", []) if isinstance(region, dict) else []
-                width = max(.5, min(100, (box[2] - box[0]) / 11)) if len(box) == 4 else 12
-                pieces.append(f'<img class="inline-math-source" style="width:{width:.3f}em;max-width:100%;height:auto;vertical-align:middle" src="data:image/png;base64,{encoded}" alt="原式{match.group(1)}，片段{index + 1}">')
-            result.append('<span class="inline-math">' + (" ".join(pieces) or "〔原式图片缺失，请查看原 PDF〕") + '</span>')
+            source = item.get("source_text")
+            source = source.strip() if isinstance(source, str) and source.strip() else f"〔待识别公式{match.group(1)}〕"
+            result.append('<span class="inline-math-source-text">' + html.escape(source) + '</span>')
         else:
             result.append("〔原式缺失，请查看原 PDF〕")
         start = match.end()

@@ -28,7 +28,7 @@ def inline_client(tmp_path, monkeypatch):
                          translation='保留⟦FOLIO_MATH_1⟧，<img src=x onerror=alert(1)>与⟦FOLIO_MATH_2⟧。',
                          math_status="source-image", ambiguous_inline_math=True,
                          equation_source={"page": 1, "bbox": [90, 100, 440, 155]},
-                         inline_math=[dict(id="m-1", placeholder="⟦FOLIO_MATH_1⟧", source=[
+                         inline_math=[dict(id="m-1", placeholder="⟦FOLIO_MATH_1⟧", source_text="x + y = z; a / b", source=[
                              dict(page=1, bbox=[100, 105, 180, 125]),
                              dict(page=1, bbox=[100, 130, 140, 150])]),
                              dict(id="m-2", placeholder="⟦FOLIO_MATH_2⟧", latex=r"\alpha_t", source=[])])
@@ -92,7 +92,8 @@ def test_all_exports_replace_protected_tokens_and_keep_source_pieces(inline_clie
     html = client.get("/api/papers/inline-paper/export?format=html")
     assert html.status_code == 200
     assert "FOLIO_MATH" not in html.text
-    assert html.text.count("data:image/png;base64,") == 3  # whole source + 2 math pieces
+    assert html.text.count("data:image/png;base64,") == 0
+    assert "x + y = z; a / b" in html.text
     assert r"\(\alpha_t\)" in html.text
     assert "&lt;img src=x onerror=alert(1)&gt;" in html.text
     assert "<img src=x onerror=alert(1)>" not in html.text
@@ -100,13 +101,13 @@ def test_all_exports_replace_protected_tokens_and_keep_source_pieces(inline_clie
     assert pdf.status_code == 200
     with PDF_LOCK, fitz.open(stream=pdf.content, filetype="pdf") as document:
         text = "".join(page.get_text() for page in document)
-        assert "FOLIO_MATH" not in text and "原式1" in text
+        assert "FOLIO_MATH" not in text and "x + y = z; a / b" in text
         assert "alpha_t" not in text, "LaTeX must be typeset, not printed as source"
         assert sum(len(page.get_drawings()) for page in document) >= 3
-        assert sum(len(page.get_image_info()) for page in document) == 3
+        assert sum(len(page.get_image_info()) for page in document) == 0
     markdown = client.get("/api/papers/inline-paper/export?format=markdown")
     assert "FOLIO_MATH" not in markdown.text
-    assert "〔原式1，见原 PDF〕" in markdown.text and r"\(\alpha_t\)" in markdown.text
+    assert "x + y = z; a / b" in markdown.text and r"\(\alpha_t\)" in markdown.text
     assert db.get_paper("inline-paper") == original, "Exports must not rewrite cached translations"
 
 
@@ -115,5 +116,5 @@ def test_plain_text_is_escaped_and_missing_formula_is_explicit():
     value = '<script>alert(1)</script> ⟦FOLIO_MATH_1⟧ ⟦FOLIO_MATH_99⟧'
     html = html_with_math(paragraph, value, {})
     assert "FOLIO_MATH" not in html and "<script>" not in html
-    assert "图片缺失" in html and "原式缺失" in html
+    assert "待识别公式" in html and "原式缺失" in html
     assert text_with_math({}, "Ordinary text stays unchanged.") == "Ordinary text stays unchanged."

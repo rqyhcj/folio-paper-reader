@@ -274,23 +274,29 @@ def _floating_predecessor(result):
     skipped = []
     while index >= 0 and len(skipped) < 4:
         item = result[index]
-        if item.get("kind") in {"algorithm", "table"}:
+        footnote = (item.get("kind") == "paragraph"
+                    and item.get("bbox") and item.get("page_height")
+                    and item["bbox"][1] >= item["page_height"] * .82
+                    and len(item.get("text", "")) <= 500
+                    and bool(re.match(r"^(?:[∗*†‡§]|\(?\d+[.)])", item.get("text", "").lstrip())))
+        if item.get("kind") in {"algorithm", "table"} or footnote:
             skipped.append(item)
         elif item.get("kind") == "paragraph" and (ALGORITHM.match(item["text"]) or TABLE.match(item["text"])):
             skipped.append(item)
         else:
             break
         index -= 1
-    structures = [item for item in skipped if item.get("kind") in {"algorithm", "table"}]
-    return (index, list(reversed(skipped))) if index >= 0 and structures else (len(result) - 1, [])
+    return (index, list(reversed(skipped))) if index >= 0 and skipped else (len(result) - 1, [])
 
 
 def _float_continuation(previous, item, skipped, old_region, body_size):
     """Require floats to account for the exact gap in this reading flow."""
-    if not skipped or any(part["page"] != item["page"] for part in skipped):
+    if not skipped:
         return False
     kinds = {part.get("kind") for part in skipped}
-    if any(part.get("kind") == "paragraph" and (
+    if any(part.get("kind") == "paragraph" and not (
+            part.get("bbox") and part.get("page_height") and part["bbox"][1] >= part["page_height"] * .82
+            and re.match(r"^(?:[∗*†‡§]|\(?\d+[.)])", part.get("text", "").lstrip())) and (
             (ALGORITHM.match(part["text"]) and "algorithm" not in kinds)
             or (TABLE.match(part["text"]) and "table" not in kinds)) for part in skipped):
         return False
@@ -303,11 +309,16 @@ def _float_continuation(previous, item, skipped, old_region, body_size):
         if overlap < min(box[2] - box[0], new_box[2] - new_box[0]) * .6:
             return False
     top, bottom = min(box[1] for box in boxes), max(box[3] for box in boxes)
-    if not -body_size * .5 <= new_box[1] - bottom <= body_size * 4:
-        return False
     same_page = old_region["page"] == item["page"]
     next_page = item["page"] == old_region["page"] + 1
     same_flow = previous.get("_last_flow") == item.get("_first_flow")
+    if next_page and all(part["page"] == old_region["page"] for part in skipped):
+        return (old_box[3] <= top + body_size and top >= previous.get("page_height", 800) * .75
+                and new_box[1] <= item.get("page_height", 800) * .4)
+    if any(part["page"] != item["page"] for part in skipped):
+        return False
+    if not -body_size * .5 <= new_box[1] - bottom <= body_size * 4:
+        return False
     if same_page and same_flow:
         return -body_size * .5 <= top - old_box[3] <= body_size * 4
     # A column/page starts with the float, followed by the actual continuation.

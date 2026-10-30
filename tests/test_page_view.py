@@ -57,7 +57,7 @@ def test_missing_pages_and_formulas_return_safe_404(source_client, path):
     assert str(db.DATA) not in response.text
 
 
-def test_equation_crop_and_pdf_export_use_original_image_and_delete_cleans_cache(source_client):
+def test_equation_crop_is_available_for_inspection_but_exports_selectable_text(source_client):
     client, _ = source_client
     crop = client.get("/api/papers/preview-paper/equations/p1.png")
     assert crop.status_code == 200
@@ -66,16 +66,18 @@ def test_equation_crop_and_pdf_export_use_original_image_and_delete_cleans_cache
     exported = client.get("/api/papers/preview-paper/export?format=pdf")
     assert exported.status_code == 200
     with PDF_LOCK, fitz.open(stream=exported.content, filetype="pdf") as document:
-        assert sum(len(page.get_image_info()) for page in document) == 1
+        assert sum(len(page.get_image_info()) for page in document) == 0
+        assert "x + y = z" in "".join(page.get_text() for page in document)
     exported_html = client.get("/api/papers/preview-paper/export?format=html")
-    assert "data:image/png;base64," in exported_html.text
+    assert "data:image/png;base64," not in exported_html.text
+    assert "x + y = z" in exported_html.text
     assert client.get("/api/papers/preview-paper/pages/1.png").status_code == 200
     assert client.delete("/api/papers/preview-paper").status_code == 200
     assert not (db.DATA / "papers" / "preview-paper").exists()
     assert client.get("/api/papers/preview-paper/pages/1.png").status_code == 404
 
 
-def test_complex_inline_source_keeps_original_crop_and_translation_in_both_exports(source_client):
+def test_complex_inline_source_exports_selectable_source_and_translation(source_client):
     client, _ = source_client
     paper = db.get_paper("preview-paper")
     paragraph = paper["paragraphs"][0]
@@ -88,10 +90,10 @@ def test_complex_inline_source_keeps_original_crop_and_translation_in_both_expor
     assert exported.status_code == 200
     with PDF_LOCK, fitz.open(stream=exported.content, filetype="pdf") as document:
         text = "".join(page.get_text() for page in document)
-        assert "GarbledSourceGlyph" not in text
+        assert "GarbledSourceGlyph" in text
         assert paragraph["translation"] in text
-        assert sum(len(page.get_image_info()) for page in document) == 1
+        assert sum(len(page.get_image_info()) for page in document) == 0
     html = client.get("/api/papers/preview-paper/export?format=html").text
-    assert html.count("data:image/png;base64,") == 1
-    assert "GarbledSourceGlyph" not in html
+    assert html.count("data:image/png;base64,") == 0
+    assert "GarbledSourceGlyph" in html
     assert paragraph["translation"] in html
